@@ -8,6 +8,8 @@ export type AgentCard = {
   color: string
   status: AgentStatus
   order: number
+  /** The agent that spawned it; absent for the main agent. */
+  parentId?: string
   startedAt: number
   endedAt?: number
   action: string
@@ -34,7 +36,49 @@ export type TaskItem = {
   status: 'pending' | 'in_progress' | 'completed'
 }
 
-export type RadarSession = { startedAt: number; isLive: boolean }
+export type RadarSession = {
+  startedAt: number
+  isLive: boolean
+  /** The pane was opened once this session, so it is not forced open again. */
+  hasAutoOpened: boolean
+  cwd: string
+}
+
+export type RateWindow = { kind: string; percentUsed: number; resetsAt?: string }
+
+/** The engine's own measurement: context window fill, plan quota, real cost. */
+export type Measure = {
+  at: number
+  contextPercent?: number
+  contextTokens?: number
+  window: number
+  rateLimits: RateWindow[]
+  costUsd?: number
+}
+
+/** Where the main turn started from, to tell what the turn itself added. */
+export type TurnBase = {
+  at: number
+  prompt: string
+  actions: number
+  tokens: number
+  usd: number
+  /** Each agent's action count at the turn's start. */
+  perAgent: Record<string, number>
+}
+
+export type RecapAgent = { label: string; color: string; actions: number }
+
+/** The last finished task, as a shareable card. */
+export type Recap = {
+  at: number
+  prompt: string
+  durationMs: number
+  actions: number
+  tokens: number
+  usd: number
+  agents: RecapAgent[]
+}
 
 declare module 'claude-code' {
   interface PluginState {
@@ -43,6 +87,9 @@ declare module 'claude-code' {
       feed: Shaped<FeedItem[]>
       tasks: Shaped<TaskItem[]>
       session: Shaped<RadarSession>
+      measure: Shaped<Measure>
+      turnBase: Shaped<TurnBase>
+      recap: Shaped<Recap | null>
     }
   }
 }

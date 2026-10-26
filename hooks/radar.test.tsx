@@ -9,14 +9,20 @@ const PANE = {
     isFocused: false,
     bodyColumns: 56,
     placement: 'dock',
-    scroll: { offset: 0, bodyRows: 40 },
+    scroll: { offset: 0, bodyRows: 60 },
     view: {},
   },
 } as const
 
-test('a subagent shows with its color, its action in plain words and its cost', async ($, on) => {
+type Raise = Record<string, (e: unknown) => Promise<unknown>>
+
+test('a subagent shows under Claude, in plain words, with its cost, and the task ends in a recap', async ($, on) => {
+  const opened: string[] = []
   on('command.register', () => ({ value: { command: 'radar' } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.open', (_, e) => {
+    opened.push((e as { id: string }).id)
+    return { value: { isPlaced: true } }
+  })
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('tool.call', () => ({ result: {} }))
   on('agent.list', () => ({
@@ -24,32 +30,53 @@ test('a subagent shows with its color, its action in plain words and its cost', 
   }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
+  on('session.measure', (_, e) => ({ changed: (e as { changed: string[] }).changed }))
+  on('audio.play', () => ({ value: undefined }))
+  on('ui.toast', () => ({ value: undefined }))
 
-  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  const anyTurn = ($ as unknown as { turn: Record<string, (e: unknown) => Promise<unknown>> }).turn
-  await anyTurn.start!({ text: 'Analyse mon projet', turnId: 't0' })
+  await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true })
+  // Smart open: nothing opens before work starts.
+  expect(opened.length).toBe(0)
+
+  const turn = ($ as unknown as { turn: Raise }).turn
+  await turn.start!({ text: 'Analyse mon projet', turnId: 't0' })
+  expect(opened).toEqual(['agent-radar'])
+
   await $.tool.call({ tool: 'Read', file_path: '/repo/src/auth.ts' })
-  await anyTurn.start!({ text: 'mission', turnId: 't1', agentId: 'a1' })
+  await turn.start!({ text: 'mission', turnId: 't1', agentId: 'a1' })
   await $.tool.call({ tool: 'Grep', pattern: 'login', agentId: 'a1' })
+
+  const session = ($ as unknown as { session: Raise }).session
+  await session.measure!({
+    context: { tokens: 84_000, window: 200_000, percent: 42 },
+    rateLimits: [{ kind: 'five_hour', percentUsed: 23.5 }],
+    cost: { usd: 0.31 },
+    changed: ['context'],
+  })
 
   for (const surface of ['desktop', 'terminal'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect(await ui.find({ type: 'Text', text: /Explore/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Cherche « login » dans le code/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /Cartographier le module auth/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Contexte de la conversation/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Quota 5 h/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /↳/ })).toBeDefined()
     await ui.unmount()
   }
 
-  await anyTurn.complete!({
-    answer: 'ok',
-    durationMs: 12_000,
-    isAborted: false,
-    turnId: 't1',
-    agentId: 'a1',
-    reason: 'answer',
+  await turn.complete!({
+    answer: 'ok', durationMs: 12_000, isAborted: false, turnId: 't1', agentId: 'a1', reason: 'answer',
   })
+  await turn.complete!({ answer: 'ok', durationMs: 30_000, isAborted: false, turnId: 't0', reason: 'answer' })
+
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /terminé/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /a terminé en 12 s/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Bilan de la dernière tâche/ })).toBeDefined()
+  expect(await ui.find({ key: 'recap-export' })).toBeDefined()
+  expect(await ui.find({ key: 'view-a1' })).toBeDefined()
   await ui.unmount()
+
+  // The pane was opened once, not at every turn.
+  await turn.start!({ text: 'encore', turnId: 't2' })
+  expect(opened.length).toBe(1)
 })

@@ -1,6 +1,6 @@
 // Pure helpers for Agent Radar: pricing, plain-language actions, formatting, SVG.
 
-import type { AgentCard, TaskItem } from '../types'
+import type { AgentCard, Recap, TaskItem } from '../types'
 
 /** Rough USD -> EUR rate used for the € estimate. */
 export const EUR_PER_USD = 0.86
@@ -385,6 +385,123 @@ export function progressSvg(opts: {
     `<defs>${grad}${stripes}</defs>` +
     track +
     fill +
+    `</svg>`
+  )
+}
+
+// ---------------------------------------------------------------- gauges
+
+/** Green while there is room, amber when it fills, red near the limit. */
+export function levelColor(percent: number): string {
+  if (percent >= 85) return '#F04438'
+  if (percent >= 60) return '#F79009'
+  return '#12B76A'
+}
+
+/** A slim gauge: filled to `percent`, a tick where auto-summary kicks in. */
+export function gaugeSvg(opts: { width: number; percent: number; tickPercent?: number }): string {
+  const W = Math.round(opts.width)
+  const H = 10
+  const p = Math.max(0, Math.min(100, opts.percent))
+  const c = levelColor(p)
+  const w = (W * p) / 100
+  const tick =
+    opts.tickPercent !== undefined
+      ? `<rect x="${((W * Math.min(100, opts.tickPercent)) / 100 - 1).toFixed(1)}" y="0" width="2" height="${H}" fill="${INK}" opacity="0.35"/>`
+      : ''
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
+    `<rect x="0" y="0" width="${W}" height="${H}" rx="5" fill="#EFEDE6"/>` +
+    `<rect x="0" y="0" width="${w.toFixed(1)}" height="${H}" rx="5" fill="${c}"/>` +
+    tick +
+    `</svg>`
+  )
+}
+
+export function textGauge(percent: number, width = 20): string {
+  const n = Math.round((Math.max(0, Math.min(100, percent)) / 100) * width)
+  return '█'.repeat(n) + '░'.repeat(width - n)
+}
+
+export function quotaName(kind: string): string {
+  if (kind === 'five_hour') return 'Quota 5 h'
+  if (kind === 'seven_day') return 'Quota 7 jours'
+  if (kind === 'spend_limit') return 'Plafond de dépense'
+  return kind.replace(/_/g, ' ')
+}
+
+export function resetLabel(resetsAt: string | undefined): string {
+  if (!resetsAt) return ''
+  const at = Date.parse(resetsAt)
+  if (Number.isNaN(at)) return ''
+  const d = new Date(at)
+  const p = (n: number) => String(n).padStart(2, '0')
+  const sameDay = new Date().toDateString() === d.toDateString()
+  return sameDay
+    ? ` · repart à ${p(d.getHours())}:${p(d.getMinutes())}`
+    : ` · repart le ${p(d.getDate())}/${p(d.getMonth() + 1)}`
+}
+
+// ---------------------------------------------------------------- recap card
+
+/** The finished task as a text to paste in a post. */
+export function recapText(r: Recap): string {
+  const lines = [
+    `🛰️ Agent Radar : bilan de ma dernière tâche avec Claude`,
+    r.prompt ? `📝 « ${clip(r.prompt, 90)} »` : '',
+    `⏱ ${fmtDuration(r.durationMs)} · ⚙️ ${r.actions} actions · 🔢 ${fmtTokens(r.tokens)} tokens · 💶 ${fmtEur(r.usd)}`,
+    r.agents.length > 1
+      ? `🤖 ${r.agents.length} agents : ${r.agents.map(a => `${a.label} (${a.actions})`).join(', ')}`
+      : `🤖 Claude a tout fait seul`,
+  ]
+  return lines.filter(Boolean).join('\n')
+}
+
+/** The finished task as a 1200x630 social card (the size LinkedIn and X preview). */
+export function recapSvg(r: Recap): string {
+  const W = 1200
+  const H = 630
+  const total = Math.max(1, r.agents.reduce((s, a) => s + a.actions, 0))
+  let x = 80
+  const barW = W - 160
+  const segments = r.agents
+    .map(a => {
+      const w = (barW * a.actions) / total
+      const seg = `<rect x="${x.toFixed(1)}" y="388" width="${Math.max(2, w - 4).toFixed(1)}" height="28" rx="8" fill="${a.color}"/>`
+      x += w
+      return seg
+    })
+    .join('')
+  const legend = r.agents
+    .slice(0, 5)
+    .map((a, i) => {
+      const lx = 80 + i * 210
+      return (
+        `<circle cx="${lx + 8}" cy="458" r="8" fill="${a.color}"/>` +
+        `<text x="${lx + 24}" y="465" ${FONT} font-size="22" fill="${INK}">${esc(clip(a.label, 14))} · ${a.actions}</text>`
+      )
+    })
+    .join('')
+  const stat = (sx: number, value: string, label: string) =>
+    `<text x="${sx}" y="300" ${FONT} font-size="54" font-weight="800" fill="${INK}">${esc(value)}</text>` +
+    `<text x="${sx}" y="336" ${FONT} font-size="22" fill="${MUTED}">${esc(label)}</text>`
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
+    `<defs><linearGradient id="rbg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#FFFFFF"/><stop offset="1" stop-color="#FFEFE6"/></linearGradient></defs>` +
+    `<rect width="${W}" height="${H}" fill="url(#rbg)"/>` +
+    `<circle cx="1080" cy="110" r="190" fill="${MAIN_COLOR}" opacity="0.07"/>` +
+    `<circle cx="1080" cy="110" r="120" fill="none" stroke="${MAIN_COLOR}" stroke-opacity="0.18" stroke-width="2"/>` +
+    `<circle cx="1080" cy="110" r="60" fill="none" stroke="${MAIN_COLOR}" stroke-opacity="0.18" stroke-width="2"/>` +
+    `<circle cx="1080" cy="110" r="10" fill="${MAIN_COLOR}"/>` +
+    `<text x="80" y="110" ${FONT} font-size="26" font-weight="700" letter-spacing="3" fill="${MAIN_COLOR}">AGENT RADAR · BILAN</text>` +
+    `<text x="80" y="176" ${FONT} font-size="40" font-weight="700" fill="${INK}">${esc(clip(r.prompt || 'Tâche terminée', 46))}</text>` +
+    stat(80, fmtDuration(r.durationMs), 'durée') +
+    stat(360, String(r.actions), 'actions') +
+    stat(600, fmtTokens(r.tokens), 'tokens') +
+    stat(870, fmtEur(r.usd), 'coût estimé') +
+    segments +
+    legend +
+    `<text x="80" y="570" ${FONT} font-size="20" fill="${MUTED}">${esc(`${r.agents.length} agent${r.agents.length > 1 ? 's' : ''} · github.com/Diwoo7/agent-radar`)}</text>` +
     `</svg>`
   )
 }

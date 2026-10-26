@@ -3,7 +3,15 @@ import type { ElementConstructor, EngineInterface, Register, SvgProps } from 'cl
 
 type Engine = EngineInterface
 
-import type { AgentCard, FeedItem, RadarSession, TaskItem } from '../types'
+import type {
+  AgentCard,
+  FeedItem,
+  Measure,
+  RadarSession,
+  Recap,
+  TaskItem,
+  TurnBase,
+} from '../types'
 import {
   CARD,
   INK,
@@ -20,16 +28,26 @@ import {
   fmtDuration,
   fmtEur,
   fmtTokens,
+  gaugeSvg,
   initials,
+  levelColor,
   progressSvg,
+  quotaName,
+  recapSvg,
+  recapText,
+  resetLabel,
   statusWord,
   taskStats,
+  textGauge,
   tokensOf,
 } from './lib'
 
 const PANE = 'agent-radar'
 const TITLE = 'Agent Radar'
 const MAIN = 'main'
+const RECAP_FILE = 'agent-radar-bilan.svg'
+/** A task counts as "long" (sound + toast at its end) past this. */
+const LONG_TASK_MS = 20_000
 
 const agentsAtom = atom({ plugin: 'agent-radar', key: 'agents' } as const, {} as Record<string, AgentCard>, {
   shape: 'agents-1',
@@ -42,9 +60,22 @@ const tasksAtom = atom({ plugin: 'agent-radar', key: 'tasks' } as const, [] as T
 })
 const sessionAtom = atom(
   { plugin: 'agent-radar', key: 'session' } as const,
-  { startedAt: 0, isLive: false } as RadarSession,
-  { shape: 'session-1' },
+  { startedAt: 0, isLive: false, hasAutoOpened: false, cwd: '' } as RadarSession,
+  { shape: 'session-2' },
 )
+const measureAtom = atom(
+  { plugin: 'agent-radar', key: 'measure' } as const,
+  { at: 0, window: 0, rateLimits: [] } as Measure,
+  { shape: 'measure-1' },
+)
+const turnBaseAtom = atom(
+  { plugin: 'agent-radar', key: 'turnBase' } as const,
+  { at: 0, prompt: '', actions: 0, tokens: 0, usd: 0, perAgent: {} } as TurnBase,
+  { shape: 'turnBase-1' },
+)
+const recapAtom = atom({ plugin: 'agent-radar', key: 'recap' } as const, null as Recap | null, {
+  shape: 'recap-1',
+})
 
 function newCard(over: Partial<AgentCard> & Pick<AgentCard, 'id' | 'type' | 'label' | 'color' | 'order'>): AgentCard {
   return {
@@ -83,12 +114,14 @@ async function ensureAgent($: Engine, agentId: string | undefined) {
   if (known[id]) return
   let type = 'agent'
   let description = ''
+  let parentId: string | undefined
   if (id !== MAIN) {
     try {
       const info = (await $.agent.list()).find(a => a.id === id)
       if (info) {
         type = info.type
         description = info.description
+        parentId = info.parentId
       }
     } catch {
       // The list is a nicety: the card still shows.
@@ -107,6 +140,7 @@ async function ensureAgent($: Engine, agentId: string | undefined) {
         type,
         label,
         description,
+        parentId: parentId ?? MAIN,
         color: PALETTE[subs.length % PALETTE.length]!,
         order: subs.length + 1,
         status: 'running',
@@ -116,17 +150,52 @@ async function ensureAgent($: Engine, agentId: string | undefined) {
   })
 }
 
-async function patchAgent(
-  $: Engine,
-  agentId: string | undefined,
-  fn: (a: AgentCard) => AgentCard,
-) {
+async function patchAgent($: Engine, agentId: string | undefined, fn: (a: AgentCard) => AgentCard) {
   const id = loopKey(agentId)
   await update($, agentsAtom, all => (all[id] ? { ...all, [id]: fn(all[id]!) } : all))
 }
 
 async function pushFeed($: Engine, item: FeedItem) {
   await update($, feedAtom, list => [...list, item].slice(-80))
+}
+
+/** Opens the pane the first time work starts in a session, never again on its own. */
+async function autoOpen($: Engine) {
+  const s = await read($, sessionAtom)
+  if (s.hasAutoOpened) return
+  await update($, sessionAtom, x => ({ ...x, hasAutoOpened: true }))
+  void $.ui.open({ id: PANE, title: TITLE })
+}
+
+function totals(agents: Record<string, AgentCard>) {
+  const list = Object.values(agents)
+  return {
+    actions: list.reduce((s, a) => s + a.actions, 0),
+    tokens: list.reduce((s, a) => s + tokensOf(a), 0),
+    usd: list.reduce((s, a) => s + a.costUsd, 0),
+  }
+}
+
+/** Agents as a tree: Claude first, each subagent under the agent that spawned it. */
+function treeOrder(agents: Record<string, AgentCard>): Array<{ a: AgentCard; depth: number }> {
+  const children = new Map<string, AgentCard[]>()
+  for (const a of Object.values(agents)) {
+    if (a.id === MAIN) continue
+    const parent = a.parentId && agents[a.parentId] ? a.parentId : MAIN
+    children.set(parent, [...(children.get(parent) ?? []), a])
+  }
+  const out: Array<{ a: AgentCard; depth: number }> = []
+  const walk = (id: string, depth: number) => {
+    const a = agents[id]
+    if (!a) return
+    out.push({ a, depth })
+    const kids = (children.get(id) ?? []).sort(
+      (x, y) => Number(y.status === 'running') - Number(x.status === 'running') || y.order - x.order,
+    )
+    for (const k of kids) walk(k.id, Math.min(depth + 1, 3))
+  }
+  walk(MAIN, 0)
+  return out
 }
 
 export const register: Register = on => {
@@ -138,14 +207,26 @@ export const register: Register = on => {
       description: 'Ouvre Agent Radar : agents, actions, progression et consommation en direct',
     })
     await update($, agentsAtom, all => (all[MAIN] ? all : { ...all, [MAIN]: mainCard() }))
-    await update($, sessionAtom, s => (s.startedAt ? s : { ...s, startedAt: Date.now() }))
-    void $.ui.open({ id: PANE, title: TITLE })
+    await update($, sessionAtom, s => ({ ...s, startedAt: s.startedAt || Date.now(), cwd: e.cwd }))
     return next(e)
   })
 
   on('command.run', { command: 'radar' }, async $ => {
+    await update($, sessionAtom, s => ({ ...s, hasAutoOpened: true }))
     await $.ui.open({ id: PANE, title: TITLE })
     return { text: 'Agent Radar est ouvert.' }
+  })
+
+  on('session.measure', async ($, e, next) => {
+    await update($, measureAtom, () => ({
+      at: Date.now(),
+      contextPercent: e.context.percent,
+      contextTokens: e.context.tokens,
+      window: e.context.window,
+      rateLimits: e.rateLimits.map(r => ({ kind: r.kind, percentUsed: r.percentUsed, resetsAt: r.resetsAt })),
+      costUsd: e.cost?.usd,
+    }))
+    return next(e)
   })
 
   // ------------------------------------------------------------ turns
@@ -154,6 +235,17 @@ export const register: Register = on => {
     const started = await next(e)
     const id = loopKey(e.agentId)
     await ensureAgent($, e.agentId)
+    if (id === MAIN) {
+      await autoOpen($)
+      const all = await read($, agentsAtom)
+      const t = totals(all)
+      await update($, turnBaseAtom, () => ({
+        at: Date.now(),
+        prompt: e.text,
+        ...t,
+        perAgent: Object.fromEntries(Object.values(all).map(a => [a.id, a.actions])),
+      }))
+    }
     await patchAgent($, e.agentId, a => ({
       ...a,
       status: 'running',
@@ -229,6 +321,36 @@ export const register: Register = on => {
         return out
       })
       await update($, sessionAtom, s => ({ ...s, isLive: false }))
+
+      // The recap of the task this turn did.
+      const all = await read($, agentsAtom)
+      const base = await read($, turnBaseAtom)
+      const now = totals(all)
+      const actions = now.actions - base.actions
+      if (actions > 0) {
+        const agents = Object.values(all)
+          .map(a => ({ label: a.label, color: a.color, actions: a.actions - (base.perAgent[a.id] ?? 0) }))
+          .filter(a => a.actions > 0)
+          .sort((x, y) => y.actions - x.actions)
+        const recap: Recap = {
+          at: Date.now(),
+          prompt: base.prompt,
+          durationMs: e.durationMs,
+          actions,
+          tokens: Math.max(0, now.tokens - base.tokens),
+          usd: Math.max(0, now.usd - base.usd),
+          agents,
+        }
+        await update($, recapAtom, () => recap)
+        if (!isError && e.durationMs >= LONG_TASK_MS) {
+          $.ui.toast(`✓ Tâche terminée en ${fmtDuration(e.durationMs)} · ${actions} actions · ${fmtEur(recap.usd)}`)
+          try {
+            await $.audio.play({ asset: 'sounds/done.wav' }, { gain: 0.6 })
+          } catch {
+            // No speaker where the session draws: the toast says it.
+          }
+        }
+      }
     } else {
       await ensureAgent($, e.agentId)
       await patchAgent($, e.agentId, a => ({
@@ -270,6 +392,7 @@ export const register: Register = on => {
     const tool = String(e.tool)
     const text = describeTool(tool, args)
     const feedId = e.tool_use_id ?? crypto.randomUUID()
+    await autoOpen($)
     await ensureAgent($, e.agentId)
     await patchAgent($, e.agentId, a => ({
       ...a,
@@ -334,23 +457,22 @@ export const register: Register = on => {
     const T = $.ui.resolve(e)
     const { Box, Text, Button } = T
     const Svg = 'Svg' in T ? (T as unknown as { Svg: ElementConstructor<SvgProps> }).Svg : undefined
+    const surface = e.surface
 
     const agents = await read($, agentsAtom)
     const feed = await read($, feedAtom)
     const tasks = await read($, tasksAtom)
     const session = await read($, sessionAtom)
+    const measure = await read($, measureAtom)
+    const recap = await read($, recapAtom)
 
     const props = (e.props ?? {}) as { bodyColumns?: number }
     const cols = props.bodyColumns ?? e.viewport?.columns ?? 60
     const px = Math.max(260, Math.min(620, Math.round(cols * 7.6)))
 
-    const list = Object.values(agents).sort((a, b) => {
-      const rank = (x: AgentCard) => (x.status === 'running' ? 0 : x.id === MAIN ? 1 : 2)
-      return rank(a) - rank(b) || b.order - a.order
-    })
-    const totalTokens = list.reduce((s, a) => s + tokensOf(a), 0)
-    const totalUsd = list.reduce((s, a) => s + a.costUsd, 0)
-    const totalActions = list.reduce((s, a) => s + a.actions, 0)
+    const list = Object.values(agents)
+    const tree = treeOrder(agents)
+    const { tokens: totalTokens, usd: totalUsd, actions: totalActions } = totals(agents)
     const byId = (id: string) => agents[id]
     const isLive = session.isLive
     const { done, total, current } = taskStats(tasks)
@@ -358,6 +480,8 @@ export const register: Register = on => {
 
     const runningSubs = list.filter(a => a.id !== MAIN && a.status === 'running')
     const barColor = runningSubs[0]?.color ?? MAIN_COLOR
+
+    // ---------------------------------------------------------- banner
 
     const header = Svg ? (
       <Svg
@@ -376,6 +500,60 @@ export const register: Register = on => {
         </Text>
       </Box>
     )
+
+    // ---------------------------------------------------------- gauges
+
+    const gaugeRow = (key: string, label: string, percent: number, detail: string) => (
+      <Box key={key} flexDirection="column">
+        <Box flexDirection="row" justifyContent="space-between" gap={1}>
+          <Text color={INK} wrap="truncate-end">
+            {label}
+          </Text>
+          <Text color={levelColor(percent)} bold>
+            {Math.round(percent)} %
+          </Text>
+        </Box>
+        {Svg ? (
+          <Svg source={gaugeSvg({ width: px - 24, percent })} alt={`${label} : ${Math.round(percent)} %`} width={px - 24} />
+        ) : (
+          <Text color={levelColor(percent)}>{textGauge(percent)}</Text>
+        )}
+        {detail !== '' && (
+          <Text color={MUTED} wrap="truncate-end">
+            {detail}
+          </Text>
+        )}
+      </Box>
+    )
+
+    const ctx = measure.contextPercent
+    const gauges = (
+      <Box flexDirection="column" gap={1} paddingX={1}>
+        <Text bold color={INK}>
+          Mémoire et quota
+        </Text>
+        {ctx === undefined ? (
+          <Text color={MUTED}>La jauge de contexte apparaît après la première réponse de Claude.</Text>
+        ) : (
+          gaugeRow(
+            'ctx',
+            'Contexte de la conversation',
+            ctx,
+            `${fmtTokens(measure.contextTokens ?? 0)} / ${fmtTokens(measure.window)} tokens${
+              ctx >= 80 ? ' · bientôt plein : Claude va résumer la conversation' : ''
+            }`,
+          )
+        )}
+        {measure.rateLimits.map(r =>
+          gaugeRow(`quota-${r.kind}`, quotaName(r.kind), r.percentUsed, resetLabel(r.resetsAt).replace(/^ · /, '')),
+        )}
+        {measure.costUsd !== undefined && (
+          <Text color={MUTED}>Coût réel de la session selon Claude : {fmtEur(measure.costUsd)}</Text>
+        )}
+      </Box>
+    )
+
+    // ---------------------------------------------------------- progress
 
     const progressLabel =
       total > 0
@@ -415,56 +593,127 @@ export const register: Register = on => {
       </Box>
     )
 
-    const visible = list.slice(0, 6)
-    const hidden = list.length - visible.length
+    // ---------------------------------------------------------- agent tree
 
-    const cards = visible.map(a => {
-      const elapsed = (a.endedAt ?? (a.status === 'running' ? now : a.endedAt ?? now)) - a.startedAt
+    const visible = tree.slice(0, 7)
+    const hidden = tree.length - visible.length
+
+    const cards = visible.map(({ a, depth }) => {
+      const elapsed = (a.endedAt ?? now) - a.startedAt
       const tokens = tokensOf(a)
+      const viewLabel = a.id === MAIN ? 'Fil principal' : 'Voir son fil'
       return (
-        <Box
-          key={`agent-${a.id}`}
-          flexDirection="row"
-          gap={1}
-          padding={1}
-          borderStyle="round"
-          borderColor={a.status === 'running' ? a.color : LINE}
-          backgroundColor={CARD}
-        >
-          {Svg ? (
-            <Svg source={avatarSvg(a)} alt={`${a.label}, ${statusWord(a)}`} width={48} height={48} isInteractive />
-          ) : (
-            <Text bold color={a.color}>
-              {a.status === 'running' ? '◉' : a.status === 'done' ? '✓' : '○'} {initials(a.type)}
-            </Text>
-          )}
-          <Box flexDirection="column" flexGrow={1} flexShrink={1}>
-            <Box flexDirection="row" justifyContent="space-between" gap={1}>
-              <Text bold color={a.color} wrap="truncate-end">
-                {a.label}
-              </Text>
-              <Text color={a.status === 'running' ? a.color : MUTED} bold={a.status === 'running'}>
-                {a.status === 'running' ? '● ' : ''}
-                {statusWord(a)}
-              </Text>
-            </Box>
-            {a.description !== '' && (
-              <Text color={MUTED} wrap="truncate-end">
-                {a.description}
+        <Box key={`agent-${a.id}`} flexDirection="row" marginLeft={depth * 3}>
+          {depth > 0 && <Text color={LINE}>↳ </Text>}
+          <Box
+            flexDirection="row"
+            flexGrow={1}
+            flexShrink={1}
+            gap={1}
+            padding={1}
+            borderStyle="round"
+            borderColor={a.status === 'running' ? a.color : LINE}
+            backgroundColor={CARD}
+          >
+            {Svg ? (
+              <Svg source={avatarSvg(a)} alt={`${a.label}, ${statusWord(a)}`} width={48} height={48} isInteractive />
+            ) : (
+              <Text bold color={a.color}>
+                {a.status === 'running' ? '◉' : a.status === 'done' ? '✓' : '○'} {initials(a.type)}
               </Text>
             )}
-            <Text color={INK} wrap="truncate-end">
-              {a.status === 'running' ? '→ ' : ''}
-              {a.action}
-            </Text>
-            <Text color={MUTED} wrap="truncate-end">
-              ⏱ {fmtDuration(Math.max(0, elapsed))} · {a.actions} action{a.actions > 1 ? 's' : ''} · {fmtTokens(tokens)}{' '}
-              tokens · {fmtEur(a.costUsd)}
-            </Text>
+            <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+              <Box flexDirection="row" justifyContent="space-between" gap={1}>
+                <Text bold color={a.color} wrap="truncate-end">
+                  {a.label}
+                </Text>
+                <Text color={a.status === 'running' ? a.color : MUTED} bold={a.status === 'running'}>
+                  {a.status === 'running' ? '● ' : ''}
+                  {statusWord(a)}
+                </Text>
+              </Box>
+              {a.description !== '' && (
+                <Text color={MUTED} wrap="truncate-end">
+                  {a.description}
+                </Text>
+              )}
+              <Text color={INK} wrap="truncate-end">
+                {a.status === 'running' ? '→ ' : ''}
+                {a.action}
+              </Text>
+              <Text color={MUTED} wrap="truncate-end">
+                ⏱ {fmtDuration(Math.max(0, elapsed))} · {a.actions} action{a.actions > 1 ? 's' : ''} ·{' '}
+                {fmtTokens(tokens)} tokens · {fmtEur(a.costUsd)}
+              </Text>
+              {(a.id !== MAIN || list.length > 1) && (
+                <Box flexDirection="row">
+                  <Button
+                    key={`view-${a.id}`}
+                    label={viewLabel}
+                    onPress={async () => {
+                      const r = await $.ui.view(a.id === MAIN ? {} : { agentId: a.id })
+                      if (r.deny) $.ui.toast(`Impossible d'ouvrir ce fil ici : ${r.deny}`)
+                    }}
+                  />
+                </Box>
+              )}
+            </Box>
           </Box>
         </Box>
       )
     })
+
+    // ---------------------------------------------------------- recap
+
+    const recapBlock = recap && (
+      <Box flexDirection="column" gap={1} paddingX={1}>
+        <Box flexDirection="row" justifyContent="space-between">
+          <Text bold color={INK}>
+            Bilan de la dernière tâche
+          </Text>
+          <Text color={MUTED}>{fmtClock(recap.at)}</Text>
+        </Box>
+        {Svg ? (
+          <Svg
+            source={recapSvg(recap)}
+            alt={recapText(recap)}
+            width={px - 24}
+            height={Math.round(((px - 24) * 630) / 1200)}
+          />
+        ) : (
+          <Text color={INK}>{recapText(recap)}</Text>
+        )}
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          <Button
+            key="recap-copy"
+            label="Copier le texte"
+            onPress={async () => {
+              const r = await $.ui.copy({ text: recapText(recap), surface })
+              $.ui.toast(r.isCopied ? 'Bilan copié, prêt à coller dans ton post' : "La copie n'est pas disponible ici")
+            }}
+          />
+          <Button
+            key="recap-export"
+            label="Exporter en image"
+            variant="primary"
+            onPress={async () => {
+              const s = await read($, sessionAtom)
+              if (!s.cwd) {
+                $.ui.toast("Export indisponible : dossier de travail inconnu")
+                return
+              }
+              await $.fs.write(`${s.cwd.replace(/\/$/, '')}/${RECAP_FILE}`, recapSvg(recap))
+              await $.prompt.submit({
+                text: `Agent Radar : convertis le fichier ${RECAP_FILE} du dossier de travail en PNG 1200×630 et envoie-le-moi, sans autre commentaire.`,
+              })
+              $.ui.toast('Export lancé : Claude va t’envoyer l’image')
+            }}
+          />
+        </Box>
+      </Box>
+    )
+
+    // ---------------------------------------------------------- feed
 
     const recent = feed.slice(-8).reverse()
     const activity = (
@@ -508,10 +757,12 @@ export const register: Register = on => {
           {cards}
           {hidden > 0 && (
             <Text color={MUTED}>
-              + {hidden} agent{hidden > 1 ? 's' : ''} terminé{hidden > 1 ? 's' : ''}
+              + {hidden} autre{hidden > 1 ? 's' : ''} agent{hidden > 1 ? 's' : ''}
             </Text>
           )}
         </Box>
+        {gauges}
+        {recapBlock}
         {activity}
         <Box flexDirection="row" justifyContent="flex-end">
           <Button
@@ -521,7 +772,8 @@ export const register: Register = on => {
               await update($, agentsAtom, () => ({ [MAIN]: mainCard() }))
               await update($, feedAtom, () => [])
               await update($, tasksAtom, () => [])
-              await update($, sessionAtom, () => ({ startedAt: Date.now(), isLive: false }))
+              await update($, recapAtom, () => null)
+              await update($, sessionAtom, s => ({ ...s, startedAt: Date.now(), isLive: false }))
             }}
           />
         </Box>
