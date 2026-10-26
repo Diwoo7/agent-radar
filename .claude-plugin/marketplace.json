@@ -1,0 +1,5 @@
+{
+  "name": "agent-radar",
+  "owner": { "name": "Tahar Saidi" },
+  "plugins": [{ "name": "agent-radar", "source": "./" }]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "agent-radar",
+  "version": "0.1.0",
+  "description": "Live pane showing which subagent works, what it does in plain words, progress, and token/€ consumption",
+  "author": { "name": "Tahar Saidi" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
