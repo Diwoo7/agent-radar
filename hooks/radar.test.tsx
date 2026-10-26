@@ -30,7 +30,7 @@ test('a subagent shows under Claude, in plain words, with its cost, and the task
   }))
   on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
-  on('session.measure', (_, e) => ({ changed: (e as { changed: string[] }).changed }))
+  on('session.measure', (_, e) => ({ changed: e.changed }))
   on('audio.play', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
 

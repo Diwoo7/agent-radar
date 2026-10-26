@@ -343,7 +343,7 @@ export const register: Register = on => {
         }
         await update($, recapAtom, () => recap)
         if (!isError && e.durationMs >= LONG_TASK_MS) {
-          $.ui.toast(`✓ Tâche terminée en ${fmtDuration(e.durationMs)} · ${actions} actions · ${fmtEur(recap.usd)}`)
+          $.ui.toast(`✓ Tâche terminée en ${fmtDuration(e.durationMs)} · ${actions} actions · ${fmtEur(recap.usd)} équiv. API`)
           try {
             await $.audio.play({ asset: 'sounds/done.wav' }, { gain: 0.6 })
           } catch {
@@ -486,7 +486,7 @@ export const register: Register = on => {
     const header = Svg ? (
       <Svg
         source={bannerSvg({ width: px, isLive, agents: list, tokens: totalTokens, usd: totalUsd, actions: totalActions })}
-        alt={`Agent Radar, ${isLive ? 'en direct' : 'en pause'}, ${fmtTokens(totalTokens)} tokens, ${fmtEur(totalUsd)}`}
+        alt={`Agent Radar, ${isLive ? 'en direct' : 'en pause'}, ${fmtTokens(totalTokens)} tokens, ${fmtEur(totalUsd)} en équivalent API`}
         width={px}
         isInteractive
       />
@@ -496,7 +496,7 @@ export const register: Register = on => {
           {isLive ? '● LIVE  ' : '○ PAUSE  '}Agent Radar
         </Text>
         <Text color={MUTED}>
-          {fmtTokens(totalTokens)} tokens · {fmtEur(totalUsd)}
+          {fmtTokens(totalTokens)} tokens · {fmtEur(totalUsd)} équiv. API
         </Text>
       </Box>
     )
@@ -548,7 +548,7 @@ export const register: Register = on => {
           gaugeRow(`quota-${r.kind}`, quotaName(r.kind), r.percentUsed, resetLabel(r.resetsAt).replace(/^ · /, '')),
         )}
         {measure.costUsd !== undefined && (
-          <Text color={MUTED}>Coût réel de la session selon Claude : {fmtEur(measure.costUsd)}</Text>
+          <Text color={MUTED}>Session entière selon Claude : {fmtEur(measure.costUsd)} en équivalent API (ton abonnement n'est pas facturé au token)</Text>
         )}
       </Box>
     )
@@ -643,7 +643,7 @@ export const register: Register = on => {
               </Text>
               <Text color={MUTED} wrap="truncate-end">
                 ⏱ {fmtDuration(Math.max(0, elapsed))} · {a.actions} action{a.actions > 1 ? 's' : ''} ·{' '}
-                {fmtTokens(tokens)} tokens · {fmtEur(a.costUsd)}
+                {fmtTokens(tokens)} tokens · {fmtEur(a.costUsd)} API
               </Text>
               {(a.id !== MAIN || list.length > 1) && (
                 <Box flexDirection="row">

@@ -2,7 +2,7 @@
 
 import type { AgentCard, Recap, TaskItem } from '../types'
 
-/** Rough USD -> EUR rate used for the € estimate. */
+/** Rough USD -> EUR rate. Every € shown is an API-equivalent estimate, not a bill. */
 export const EUR_PER_USD = 0.86
 
 /** Claude orange for the main agent, then one vivid color per subagent. */
@@ -90,7 +90,7 @@ export function fmtTokens(n: number): string {
 export function fmtEur(usd: number): string {
   const eur = usd * EUR_PER_USD
   if (eur > 0 && eur < 0.01) return '< 0,01 €'
-  return eur.toFixed(2).replace('.', ',') + ' €'
+  return '≈ ' + eur.toFixed(2).replace('.', ',') + ' €'
 }
 
 export function fmtDuration(ms: number): string {
@@ -342,7 +342,7 @@ export function bannerSvg(opts: {
     `<text x="86" y="56" ${FONT} font-size="12" fill="${MUTED}">${esc(subtitle)}</text>` +
     live +
     `<text x="${W - 16}" y="52" text-anchor="end" ${FONT} font-size="15" font-weight="700" fill="${INK}">${esc(fmtEur(opts.usd))}</text>` +
-    `<text x="${W - 16}" y="68" text-anchor="end" ${FONT} font-size="11" fill="${MUTED}">${esc(fmtTokens(opts.tokens))} tokens</text>` +
+    `<text x="${W - 16}" y="68" text-anchor="end" ${FONT} font-size="11" fill="${MUTED}">${esc(fmtTokens(opts.tokens))} tokens · équivalent API</text>` +
     `</svg>`
   )
 }
@@ -449,7 +449,7 @@ export function recapText(r: Recap): string {
   const lines = [
     `🛰️ Agent Radar : bilan de ma dernière tâche avec Claude`,
     r.prompt ? `📝 « ${clip(r.prompt, 90)} »` : '',
-    `⏱ ${fmtDuration(r.durationMs)} · ⚙️ ${r.actions} actions · 🔢 ${fmtTokens(r.tokens)} tokens · 💶 ${fmtEur(r.usd)}`,
+    `⏱ ${fmtDuration(r.durationMs)} · ⚙️ ${r.actions} actions · 🔢 ${fmtTokens(r.tokens)} tokens · 💶 ${fmtEur(r.usd)} en équivalent API`,
     r.agents.length > 1
       ? `🤖 ${r.agents.length} agents : ${r.agents.map(a => `${a.label} (${a.actions})`).join(', ')}`
       : `🤖 Claude a tout fait seul`,
@@ -498,7 +498,7 @@ export function recapSvg(r: Recap): string {
     stat(80, fmtDuration(r.durationMs), 'durée') +
     stat(360, String(r.actions), 'actions') +
     stat(600, fmtTokens(r.tokens), 'tokens') +
-    stat(870, fmtEur(r.usd), 'coût estimé') +
+    stat(870, fmtEur(r.usd), 'équivalent API') +
     segments +
     legend +
     `<text x="80" y="570" ${FONT} font-size="20" fill="${MUTED}">${esc(`${r.agents.length} agent${r.agents.length > 1 ? 's' : ''} · github.com/Diwoo7/agent-radar`)}</text>` +
