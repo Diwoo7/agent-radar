@@ -1,5 +1,7 @@
 # Agent Radar
 
+<p align="center"><img src="docs/preview.png" alt="Agent Radar pane: colored agent cards, live progress bar, tokens and € per agent" width="420"></p>
+
 See what Claude Code does behind the scenes, live. Agent Radar is a mod that docks a light, animated pane beside the chat:
 
 - **Which subagent is working**: every agent (Claude, Explore, Plan, general-purpose, your own agents) gets its own color and a pulsing avatar while it works.
