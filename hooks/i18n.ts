@@ -116,6 +116,16 @@ export type Strings = {
   reset: string
   commandDesc: string
   opened: string
+  // replay
+  replayStart: string
+  replayBadge: (speed: number) => string
+  replayPause: string
+  replayResume: string
+  replaySpeed: (speed: number) => string
+  replayExit: string
+  replayRestart: string
+  replayClock: (at: string, total: string) => string
+  replayDone: string
 }
 
 const s = (n: number) => (n > 1 ? 's' : '')
@@ -225,6 +235,15 @@ const fr: Strings = {
   reset: 'Remettre à zéro',
   commandDesc: 'Ouvre Agent Radar : agents, actions, progression et consommation en direct',
   opened: 'Agent Radar est ouvert.',
+  replayStart: '▶ Rejouer la tâche',
+  replayBadge: x => `REPLAY ×${x}`,
+  replayPause: '⏸ Pause',
+  replayResume: '▶ Reprendre',
+  replaySpeed: x => `Vitesse ×${x}`,
+  replayExit: '■ Quitter le replay',
+  replayRestart: '↺ Recommencer',
+  replayClock: (a, t) => `Replay ${a} / ${t}`,
+  replayDone: 'Replay terminé',
 }
 
 const en: Strings = {
@@ -332,6 +351,15 @@ const en: Strings = {
   reset: 'Reset',
   commandDesc: 'Opens Agent Radar: agents, actions, progress and consumption, live',
   opened: 'Agent Radar is open.',
+  replayStart: '▶ Replay the task',
+  replayBadge: x => `REPLAY ×${x}`,
+  replayPause: '⏸ Pause',
+  replayResume: '▶ Resume',
+  replaySpeed: x => `Speed ×${x}`,
+  replayExit: '■ Exit replay',
+  replayRestart: '↺ Restart',
+  replayClock: (a, t) => `Replay ${a} / ${t}`,
+  replayDone: 'Replay finished',
 }
 
 const nl: Strings = {
@@ -439,6 +467,15 @@ const nl: Strings = {
   reset: 'Opnieuw beginnen',
   commandDesc: 'Opent Agent Radar: agents, acties, voortgang en verbruik, live',
   opened: 'Agent Radar is open.',
+  replayStart: '▶ Taak opnieuw afspelen',
+  replayBadge: x => `REPLAY ×${x}`,
+  replayPause: '⏸ Pauze',
+  replayResume: '▶ Verder',
+  replaySpeed: x => `Snelheid ×${x}`,
+  replayExit: '■ Replay sluiten',
+  replayRestart: '↺ Opnieuw',
+  replayClock: (a, t) => `Replay ${a} / ${t}`,
+  replayDone: 'Replay afgelopen',
 }
 
 export const STRINGS: Record<Lang, Strings> = { fr, en, nl }

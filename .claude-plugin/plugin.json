@@ -1,6 +1,6 @@
 {
   "name": "agent-radar",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "description": "Live pane showing which subagent works, what it does in plain words, progress, and token/€ consumption",
   "author": { "name": "Tahar Saidi" },
   "license": "MIT",

@@ -9,11 +9,24 @@ import type {
   Measure,
   RadarSession,
   Recap,
+  Replay,
+  Tape,
   TaskItem,
   TurnBase,
 } from '../types'
 import { STRINGS, detectLang, isLang, langFromName } from './i18n'
 import type { Lang, Strings } from './i18n'
+import {
+  IDLE_REPLAY,
+  autoSpeed,
+  fmtClockMs,
+  newTape,
+  nextSpeed,
+  record,
+  replayPosition,
+  stateAt,
+  tapeDuration,
+} from './replay'
 import {
   CARD,
   INK,
@@ -77,6 +90,15 @@ const turnBaseAtom = atom(
 )
 const recapAtom = atom({ plugin: 'agent-radar', key: 'recap' } as const, null as Recap | null, {
   shape: 'recap-1',
+})
+const liveTapeAtom = atom({ plugin: 'agent-radar', key: 'liveTape' } as const, null as Tape | null, {
+  shape: 'tape-1',
+})
+const lastTapeAtom = atom({ plugin: 'agent-radar', key: 'lastTape' } as const, null as Tape | null, {
+  shape: 'tape-1',
+})
+const replayAtom = atom({ plugin: 'agent-radar', key: 'replay' } as const, IDLE_REPLAY as Replay, {
+  shape: 'replay-1',
 })
 
 function newCard(over: Partial<AgentCard> & Pick<AgentCard, 'id' | 'type' | 'label' | 'color' | 'order'>): AgentCard {
@@ -172,15 +194,18 @@ async function ensureAgent($: Engine, agentId: string | undefined) {
       }),
     }
   })
+  await recordCard($, id)
 }
 
 async function patchAgent($: Engine, agentId: string | undefined, fn: (a: AgentCard) => AgentCard) {
   const id = loopKey(agentId)
   await update($, agentsAtom, all => (all[id] ? { ...all, [id]: fn(all[id]!) } : all))
+  await recordCard($, id)
 }
 
 async function pushFeed($: Engine, item: FeedItem) {
   await update($, feedAtom, list => [...list, item].slice(-80))
+  await update($, liveTapeAtom, tape => record(tape, { t: Date.now(), kind: 'feed', item }))
 }
 
 /** Opens the pane the first time work starts in a session, never again on its own. */
@@ -198,6 +223,96 @@ function totals(agents: Record<string, AgentCard>) {
     tokens: list.reduce((s, a) => s + tokensOf(a), 0),
     usd: list.reduce((s, a) => s + a.costUsd, 0),
   }
+}
+
+// ------------------------------------------------------------ recording
+
+/** Puts a card's current state on the tape of the task in progress. */
+async function recordCard($: Engine, id: string) {
+  const card = (await read($, agentsAtom))[id]
+  if (card) await update($, liveTapeAtom, tape => record(tape, { t: Date.now(), kind: 'agent', card }))
+}
+
+async function recordTasks($: Engine) {
+  const tasks = await read($, tasksAtom)
+  await update($, liveTapeAtom, tape => record(tape, { t: Date.now(), kind: 'tasks', tasks }))
+}
+
+// ------------------------------------------------------------ replay
+
+/** The timer that redraws a playing replay; a reload drops it and session.start restarts it. */
+let ticker: { cancel: () => void } | undefined
+
+function startTicker($: Engine) {
+  ticker?.cancel()
+  ticker = $.clock.every(250, () => {
+    void tick($)
+  })
+}
+
+function stopTicking() {
+  ticker?.cancel()
+  ticker = undefined
+}
+
+async function tick($: Engine) {
+  const tape = await read($, lastTapeAtom)
+  const replay = await read($, replayAtom)
+  if (!tape || !replay.isActive || !replay.isPlaying) {
+    stopTicking()
+    return
+  }
+  const total = tapeDuration(tape)
+  if (replayPosition(replay, Date.now()) >= total) {
+    stopTicking()
+    await update($, replayAtom, r => ({ ...r, isPlaying: false, offsetMs: total, frame: r.frame + 1 }))
+    return
+  }
+  await update($, replayAtom, r => ({ ...r, frame: r.frame + 1 }))
+}
+
+async function startReplay($: Engine) {
+  const tape = await read($, lastTapeAtom)
+  if (!tape) return
+  await update($, replayAtom, () => ({
+    isActive: true,
+    isPlaying: true,
+    speed: autoSpeed(tapeDuration(tape)),
+    wallStart: Date.now(),
+    offsetMs: 0,
+    frame: 0,
+  }))
+  startTicker($)
+}
+
+async function pauseReplay($: Engine) {
+  stopTicking()
+  await update($, replayAtom, r => ({ ...r, isPlaying: false, offsetMs: replayPosition(r, Date.now()) }))
+}
+
+async function resumeReplay($: Engine) {
+  const tape = await read($, lastTapeAtom)
+  await update($, replayAtom, r => ({
+    ...r,
+    isPlaying: true,
+    wallStart: Date.now(),
+    offsetMs: tape && r.offsetMs >= tapeDuration(tape) ? 0 : r.offsetMs,
+  }))
+  startTicker($)
+}
+
+async function changeSpeed($: Engine) {
+  await update($, replayAtom, r => ({
+    ...r,
+    offsetMs: replayPosition(r, Date.now()),
+    wallStart: Date.now(),
+    speed: nextSpeed(r.speed),
+  }))
+}
+
+async function exitReplay($: Engine) {
+  stopTicking()
+  await update($, replayAtom, () => IDLE_REPLAY)
 }
 
 /** Agents as a tree: Claude first, each subagent under the agent that spawned it. */
@@ -243,6 +358,7 @@ export const register: Register = (on, options) => {
     const t = await words($)
     await $.command.register({ name: 'radar', description: t.commandDesc })
     await update($, agentsAtom, all => (all[MAIN] ? all : { ...all, [MAIN]: mainCard(t) }))
+    if ((await read($, replayAtom)).isPlaying) startTicker($)
     return next(e)
   })
 
@@ -289,6 +405,8 @@ export const register: Register = (on, options) => {
         ...totals(all),
         perAgent: Object.fromEntries(Object.values(all).map(a => [a.id, a.actions])),
       }))
+      const tasks = await read($, tasksAtom)
+      await update($, liveTapeAtom, () => newTape(all, tasks, Date.now()))
     }
     await patchAgent($, e.agentId, a => ({
       ...a,
@@ -354,6 +472,7 @@ export const register: Register = (on, options) => {
         endedAt: Date.now(),
         action: isError ? t.interrupted : t.answered,
       }))
+      const before = await read($, agentsAtom)
       await update($, agentsAtom, all => {
         const out: Record<string, AgentCard> = {}
         for (const [k, a] of Object.entries(all)) {
@@ -361,6 +480,7 @@ export const register: Register = (on, options) => {
         }
         return out
       })
+      for (const [k, a] of Object.entries(before)) if (a.status === 'running' && k !== MAIN) await recordCard($, k)
       await update($, sessionAtom, s => ({ ...s, isLive: false }))
 
       // The recap of the task this turn did.
@@ -387,6 +507,8 @@ export const register: Register = (on, options) => {
           agents,
         }
         await update($, recapAtom, () => recap)
+        const tape = await read($, liveTapeAtom)
+        if (tape) await update($, lastTapeAtom, () => ({ ...tape, endedAt: Date.now() }))
         if (!isError && e.durationMs >= LONG_TASK_MS) {
           $.ui.toast(t.toastDone(fmtDuration(e.durationMs), actions, fmtEur(recap.usd, t)))
           try {
@@ -451,6 +573,7 @@ export const register: Register = (on, options) => {
           status: (td.status === 'completed' || td.status === 'in_progress' ? td.status : 'pending') as TaskItem['status'],
         })),
       )
+      await recordTasks($)
     }
 
     const ran = await next(e)
@@ -464,6 +587,7 @@ export const register: Register = (on, options) => {
         const id = String(fromResult ?? fromText ?? list.length + 1)
         return list.some(x => x.id === id) ? list : [...list, { id, subject, status: 'pending' }]
       })
+      await recordTasks($)
     }
     if (tool === 'TaskUpdate' && args.taskId !== undefined) {
       const id = String(args.taskId)
@@ -483,9 +607,11 @@ export const register: Register = (on, options) => {
                 : x,
             ),
       )
+      await recordTasks($)
     }
 
     await update($, feedAtom, list => list.map(f => (f.id === feedId ? { ...f, isDone: true } : f)))
+    await update($, liveTapeAtom, tape => record(tape, { t: Date.now(), kind: 'feedDone', id: feedId }))
     return ran
   }).catch(($, e, next) => next(e))
 
@@ -497,13 +623,25 @@ export const register: Register = (on, options) => {
     const Svg = 'Svg' in T ? (T as unknown as { Svg: ElementConstructor<SvgProps> }).Svg : undefined
     const surface = e.surface
 
-    const agents = await read($, agentsAtom)
-    const feed = await read($, feedAtom)
-    const tasks = await read($, tasksAtom)
+    const liveAgents = await read($, agentsAtom)
+    const liveFeed = await read($, feedAtom)
+    const liveTasks = await read($, tasksAtom)
     const session = await read($, sessionAtom)
     const measure = await read($, measureAtom)
     const recap = await read($, recapAtom)
+    const replay = await read($, replayAtom)
+    const lastTape = await read($, lastTapeAtom)
     const t = STRINGS[isLang(session.lang) ? session.lang : 'fr']
+
+    // During a replay the pane draws the recorded task as it stood at the playback position.
+    const tapeTotal = lastTape ? tapeDuration(lastTape) : 0
+    const isReplay = replay.isActive && lastTape !== null
+    const position = isReplay ? Math.min(tapeTotal, replayPosition(replay, Date.now())) : 0
+    const isReplayOver = isReplay && position >= tapeTotal
+    const replayed = isReplay && lastTape ? stateAt(lastTape, position) : undefined
+    const agents = replayed?.agents ?? liveAgents
+    const feed = replayed?.feed ?? liveFeed
+    const tasks = replayed?.tasks ?? liveTasks
 
     const props = (e.props ?? {}) as { bodyColumns?: number }
     const cols = props.bodyColumns ?? e.viewport?.columns ?? 60
@@ -515,7 +653,7 @@ export const register: Register = (on, options) => {
     const tree = treeOrder(agents).map(n => ({ ...n, a: named(n.a) }))
     const { tokens: totalTokens, usd: totalUsd, actions: totalActions } = totals(agents)
     const byId = (id: string) => (agents[id] ? named(agents[id]!) : undefined)
-    const isLive = session.isLive
+    const isLive = isReplay ? replay.isPlaying && !isReplayOver : session.isLive
     const { done, total, current } = taskStats(tasks)
     const now = Date.now()
 
@@ -526,7 +664,16 @@ export const register: Register = (on, options) => {
 
     const header = Svg ? (
       <Svg
-        source={bannerSvg({ width: px, isLive, agents: list, tokens: totalTokens, usd: totalUsd, actions: totalActions, t })}
+        source={bannerSvg({
+          width: px,
+          isLive,
+          agents: list,
+          tokens: totalTokens,
+          usd: totalUsd,
+          actions: totalActions,
+          t,
+          badge: isReplay ? t.replayBadge(replay.speed) : undefined,
+        })}
         alt={t.altBanner(isLive, fmtTokens(totalTokens, t), fmtEur(totalUsd, t))}
         width={px}
         isInteractive
@@ -534,7 +681,7 @@ export const register: Register = (on, options) => {
     ) : (
       <Box flexDirection="row" justifyContent="space-between">
         <Text bold color={INK}>
-          {isLive ? `● ${t.live}  ` : `○ ${t.pause}  `}Agent Radar
+          {isReplay ? `▶ ${t.replayBadge(replay.speed)}  ` : isLive ? `● ${t.live}  ` : `○ ${t.pause}  `}Agent Radar
         </Text>
         <Text color={MUTED}>
           {fmtEur(totalUsd, t)} · {t.tokensApi(fmtTokens(totalTokens, t))}
@@ -715,6 +862,9 @@ export const register: Register = (on, options) => {
           <Text color={INK}>{recapText(recap, t)}</Text>
         )}
         <Box flexDirection="row" gap={1} flexWrap="wrap">
+          {lastTape && !isReplay && (
+            <Button key="replay-start" label={t.replayStart} variant="primary" onPress={() => startReplay($)} />
+          )}
           <Button
             key="recap-copy"
             label={t.copyText}
@@ -726,7 +876,6 @@ export const register: Register = (on, options) => {
           <Button
             key="recap-export"
             label={t.exportImage}
-            variant="primary"
             onPress={async () => {
               const s = await read($, sessionAtom)
               if (!s.cwd) {
@@ -770,9 +919,42 @@ export const register: Register = (on, options) => {
       </Box>
     )
 
+    // ---------------------------------------------------------- replay bar
+
+    const replayBar = isReplay && (
+      <Box flexDirection="column" gap={1} paddingX={1}>
+        <Box flexDirection="row" justifyContent="space-between">
+          <Text bold color={MAIN_COLOR}>
+            {isReplayOver ? t.replayDone : t.replayClock(fmtClockMs(position), fmtClockMs(tapeTotal))}
+          </Text>
+        </Box>
+        {Svg ? (
+          <Svg
+            source={progressSvg({ width: px - 24, ratio: position / tapeTotal, color: MAIN_COLOR, isLive: false })}
+            alt={t.replayClock(fmtClockMs(position), fmtClockMs(tapeTotal))}
+            width={px - 24}
+          />
+        ) : (
+          <Text color={MAIN_COLOR}>{textGauge((position / tapeTotal) * 100, 24)}</Text>
+        )}
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          {isReplayOver ? (
+            <Button key="replay-restart" label={t.replayRestart} variant="primary" onPress={() => resumeReplay($)} />
+          ) : replay.isPlaying ? (
+            <Button key="replay-pause" label={t.replayPause} onPress={() => pauseReplay($)} />
+          ) : (
+            <Button key="replay-resume" label={t.replayResume} variant="primary" onPress={() => resumeReplay($)} />
+          )}
+          {!isReplayOver && <Button key="replay-speed" label={t.replaySpeed(nextSpeed(replay.speed))} onPress={() => changeSpeed($)} />}
+          <Button key="replay-exit" label={t.replayExit} onPress={() => exitReplay($)} />
+        </Box>
+      </Box>
+    )
+
     return (
       <Box flexDirection="column" gap={1} padding={1} backgroundColor={PAPER}>
         {header}
+        {replayBar}
         {progress}
         <Box flexDirection="column" gap={1}>
           <Box flexDirection="row" justifyContent="space-between" paddingX={1}>
@@ -784,9 +966,10 @@ export const register: Register = (on, options) => {
           {cards}
           {hidden > 0 && <Text color={MUTED}>{t.others(hidden)}</Text>}
         </Box>
-        {gauges}
-        {recapBlock}
+        {!isReplay && gauges}
+        {(!isReplay || isReplayOver) && recapBlock}
         {activity}
+        {!isReplay && (
         <Box flexDirection="row" justifyContent="flex-end">
           <Button
             key="reset"
@@ -800,6 +983,7 @@ export const register: Register = (on, options) => {
             }}
           />
         </Box>
+        )}
       </Box>
     )
   })

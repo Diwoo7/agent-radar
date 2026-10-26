@@ -74,6 +74,17 @@ test('a subagent shows under Claude, in plain words, with its cost, and the task
   expect(await ui.find({ type: 'Text', text: /Bilan de la dernière tâche/ })).toBeDefined()
   expect(await ui.find({ key: 'recap-export' })).toBeDefined()
   expect(await ui.find({ key: 'view-a1' })).toBeDefined()
+
+  // Replay: the recorded task plays back in a clean view, then hands the pane back.
+  await ui.press({ key: 'replay-start' })
+  expect(await ui.find({ type: 'Text', text: /^Replay 0:0\d \/ / })).toBeDefined()
+  expect(await ui.find({ key: 'replay-pause' })).toBeDefined()
+  expect(await ui.find({ key: 'reset' })).toBeUndefined()
+  await ui.press({ key: 'replay-pause' })
+  expect(await ui.find({ key: 'replay-resume' })).toBeDefined()
+  await ui.press({ key: 'replay-exit' })
+  expect(await ui.find({ key: 'reset' })).toBeDefined()
+  expect(await ui.find({ key: 'replay-start' })).toBeDefined()
   await ui.unmount()
 
   // The pane was opened once, not at every turn.

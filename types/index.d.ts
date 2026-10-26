@@ -94,6 +94,35 @@ declare module 'claude-code' {
       measure: Shaped<Measure>
       turnBase: Shaped<TurnBase>
       recap: Shaped<Recap | null>
+      liveTape: Shaped<Tape | null>
+      lastTape: Shaped<Tape | null>
+      replay: Shaped<Replay>
     }
   }
+}
+
+/** One change recorded during a task, at `t` (epoch ms). */
+export type TapeEvent =
+  | { t: number; kind: 'agent'; card: AgentCard }
+  | { t: number; kind: 'feed'; item: FeedItem }
+  | { t: number; kind: 'feedDone'; id: string }
+  | { t: number; kind: 'tasks'; tasks: TaskItem[] }
+
+/** A task as it happened: where it started from, and every change after. */
+export type Tape = {
+  startedAt: number
+  endedAt?: number
+  agents: Record<string, AgentCard>
+  tasks: TaskItem[]
+  events: TapeEvent[]
+}
+
+/** Playback of the last tape: the virtual time is `offsetMs + (now - wallStart) * speed` while playing. */
+export type Replay = {
+  isActive: boolean
+  isPlaying: boolean
+  speed: number
+  wallStart: number
+  offsetMs: number
+  frame: number
 }

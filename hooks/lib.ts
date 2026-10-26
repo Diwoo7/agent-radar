@@ -281,6 +281,8 @@ export function bannerSvg(opts: {
   usd: number
   actions: number
   t: Strings
+  /** Replaces LIVE / PAUSE, as REPLAY ×10 does. */
+  badge?: string
 }): string {
   const t = opts.t
   const W = Math.round(opts.width)
@@ -317,7 +319,10 @@ export function bannerSvg(opts: {
     : opts.actions === 0
       ? t.waitingFirst
       : t.paused(opts.actions)
-  const word = opts.isLive ? t.live : t.pause
+  // The subtitle stops short of the totals on the right: about 6.6 px a character at 12 px.
+  const room = Math.max(12, Math.floor((W - 86 - 150) / 6.6))
+  const shownSubtitle = clip(subtitle, room)
+  const word = opts.badge ?? (opts.isLive ? t.live : t.pause)
   const wx = W - 16 - word.length * 9.2
   const live = opts.isLive
     ? `<circle cx="${(wx - 10).toFixed(1)}" cy="22" r="4.5" fill="#F04438"><animate attributeName="opacity" values="1;0.25;1" dur="1.1s" repeatCount="indefinite"/></circle>` +
@@ -340,7 +345,7 @@ export function bannerSvg(opts: {
     blips +
     `<circle cx="${cx}" cy="${cy}" r="2.5" fill="${MAIN_COLOR}"/>` +
     `<text x="86" y="36" ${FONT} font-size="17" font-weight="700" fill="${INK}">Agent Radar</text>` +
-    `<text x="86" y="56" ${FONT} font-size="12" fill="${MUTED}">${esc(subtitle)}</text>` +
+    `<text x="86" y="56" ${FONT} font-size="12" fill="${MUTED}">${esc(shownSubtitle)}</text>` +
     live +
     `<text x="${W - 16}" y="52" text-anchor="end" ${FONT} font-size="15" font-weight="700" fill="${INK}">${esc(fmtEur(opts.usd, t))}</text>` +
     `<text x="${W - 16}" y="68" text-anchor="end" ${FONT} font-size="11" fill="${MUTED}">${esc(t.tokensApi(fmtTokens(opts.tokens, t)))}</text>` +

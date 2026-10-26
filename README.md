@@ -14,6 +14,10 @@ See what Claude does behind the scenes, live. Agent Radar is a mod that docks a 
 
 <p align="center"><img src="docs/recap-example.png" alt="Example recap card: duration, actions, tokens, cost and a bar per agent" width="600"></p>
 
+- **Replay**: every task is recorded. **▶ Rejouer la tâche** plays it back in the pane, sped up to about 45 seconds (×1 to ×100), in a clean view made for screen recording: pause, change speed, restart, exit. The recap shows at the end.
+
+<p align="center"><img src="docs/replay.png" alt="Replay view: REPLAY ×10 badge, playback bar, pause, speed and exit buttons" width="420"></p>
+
 Everything comes from Claude's official mod hooks (turns, model requests, tool calls, usage measurements). No screen scraping, no injected code.
 
 ## Install
