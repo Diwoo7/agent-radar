@@ -42,6 +42,10 @@ export type RadarSession = {
   /** The pane was opened once this session, so it is not forced open again. */
   hasAutoOpened: boolean
   cwd: string
+  /** The language the pane speaks. */
+  lang: 'fr' | 'en' | 'nl'
+  /** Where that language came from: the plugin's setting, Claude's setting or locale, the person's prompt, or the default. */
+  langSource: 'config' | 'setting' | 'prompt' | 'default'
 }
 
 export type RateWindow = { kind: string; percentUsed: number; resetsAt?: string }

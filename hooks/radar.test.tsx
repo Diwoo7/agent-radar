@@ -80,3 +80,40 @@ test('a subagent shows under Claude, in plain words, with its cost, and the task
   await turn.start!({ text: 'encore', turnId: 't2' })
   expect(opened.length).toBe(1)
 })
+
+type TestOn = Parameters<Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>>[1]
+
+function engineStubs(on: TestOn) {
+  on('command.register', () => ({ value: { command: 'radar' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+}
+
+test('in auto, the pane follows the language of the request', async ($, on) => {
+  engineStubs(on)
+  await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true })
+  const turn = ($ as unknown as { turn: Raise }).turn
+  await turn.start!({ text: 'Can you please review the code in this repo for me?', turnId: 't0' })
+  await $.tool.call({ tool: 'Read', file_path: '/repo/src/auth.ts' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /Reads auth\.ts/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Progress$/ })).toBeDefined()
+  expect(await ui.find({ key: 'reset' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the language picked in the settings wins over the request', { options: { language: 'nl' } }, async ($, on) => {
+  engineStubs(on)
+  await $.session.start({ cwd: '/repo', surface: 'desktop', isInteractive: true })
+  const turn = ($ as unknown as { turn: Raise }).turn
+  await turn.start!({ text: 'Fais-moi une analyse complète du projet, je veux tout comprendre', turnId: 't0' })
+  await $.tool.call({ tool: 'Grep', pattern: 'login' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Zoekt „login” in de code/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Voortgang$/ })).toBeDefined()
+  await ui.unmount()
+})

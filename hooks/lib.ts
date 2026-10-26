@@ -1,6 +1,7 @@
 // Pure helpers for Agent Radar: pricing, plain-language actions, formatting, SVG.
 
 import type { AgentCard, Recap, TaskItem } from '../types'
+import type { Strings } from './i18n'
 
 /** Rough USD -> EUR rate. Every € shown is an API-equivalent estimate, not a bill. */
 export const EUR_PER_USD = 0.86
@@ -81,16 +82,16 @@ export function costUsd(model: string, u: Usage): number {
 
 // ---------------------------------------------------------------- formatting
 
-export function fmtTokens(n: number): string {
+export function fmtTokens(n: number, t: Strings): string {
   if (n < 1000) return String(Math.round(n))
-  if (n < 1_000_000) return (n / 1000).toFixed(n < 10_000 ? 1 : 0).replace('.', ',') + ' k'
-  return (n / 1_000_000).toFixed(2).replace('.', ',') + ' M'
+  if (n < 1_000_000) return (n / 1000).toFixed(n < 10_000 ? 1 : 0).replace('.', t.decimal) + ' k'
+  return (n / 1_000_000).toFixed(2).replace('.', t.decimal) + ' M'
 }
 
-export function fmtEur(usd: number): string {
+export function fmtEur(usd: number, t: Strings): string {
   const eur = usd * EUR_PER_USD
-  if (eur > 0 && eur < 0.01) return '< 0,01 €'
-  return '≈ ' + eur.toFixed(2).replace('.', ',') + ' €'
+  if (eur > 0 && eur < 0.01) return t.eur(`0${t.decimal}01`).replace('≈', '<')
+  return t.eur(eur.toFixed(2).replace('.', t.decimal))
 }
 
 export function fmtDuration(ms: number): string {
@@ -116,14 +117,14 @@ function clip(text: string, max: number): string {
   return one.length > max ? one.slice(0, max - 1) + '…' : one
 }
 
-function baseName(path: unknown): string {
-  if (typeof path !== 'string' || path === '') return 'un fichier'
+function baseName(path: unknown, t: Strings): string {
+  if (typeof path !== 'string' || path === '') return t.aFile
   const parts = path.split(/[\\/]/).filter(Boolean)
   return parts[parts.length - 1] ?? path
 }
 
-function hostOf(url: unknown): string {
-  if (typeof url !== 'string') return 'une page web'
+function hostOf(url: unknown, t: Strings): string {
+  if (typeof url !== 'string') return t.aPage
   try {
     return new URL(url).host
   } catch {
@@ -134,58 +135,54 @@ function hostOf(url: unknown): string {
 // ---------------------------------------------------------------- plain words
 
 /** What a tool call does, said the way a person would say it. */
-export function describeTool(tool: string, args: Record<string, unknown>): string {
+export function describeTool(tool: string, args: Record<string, unknown>, t: Strings): string {
   const s = (k: string) => (typeof args[k] === 'string' ? (args[k] as string) : '')
   switch (tool) {
     case 'Read':
-      return `Lit le fichier ${baseName(args.file_path)}`
+      return t.readFile(baseName(args.file_path, t))
     case 'Write':
-      return `Écrit le fichier ${baseName(args.file_path)}`
+      return t.writeFile(baseName(args.file_path, t))
     case 'Edit':
     case 'MultiEdit':
-      return `Modifie ${baseName(args.file_path)}`
+      return t.editFile(baseName(args.file_path, t))
     case 'NotebookEdit':
-      return `Modifie le notebook ${baseName(args.notebook_path)}`
+      return t.editNotebook(baseName(args.notebook_path, t))
     case 'Grep':
-      return `Cherche « ${clip(s('pattern'), 40)} » dans le code`
+      return t.grep(clip(s('pattern'), 40))
     case 'Glob':
-      return `Liste les fichiers ${clip(s('pattern'), 40)}`
+      return t.glob(clip(s('pattern'), 40))
     case 'Bash':
-      return s('description') ? `Lance : ${clip(s('description'), 70)}` : `Lance une commande`
+      return s('description') ? t.bashDesc(clip(s('description'), 70)) : t.bash
     case 'WebSearch':
-      return `Recherche sur le web : « ${clip(s('query'), 50)} »`
+      return t.webSearch(clip(s('query'), 50))
     case 'WebFetch':
-      return `Lit la page ${hostOf(args.url)}`
+      return t.webFetch(hostOf(args.url, t))
     case 'TodoWrite':
     case 'TaskCreate':
-      return s('subject') ? `Planifie : ${clip(s('subject'), 60)}` : 'Met à jour son plan'
+      return s('subject') ? t.plan(clip(s('subject'), 60)) : t.planUpdate
     case 'TaskUpdate':
-      return s('status') === 'completed' ? 'Coche une tâche terminée ✓' : 'Met à jour la progression'
+      return s('status') === 'completed' ? t.taskDone : t.taskUpdate
     case 'TaskList':
     case 'TaskGet':
-      return 'Relit la liste des tâches'
+      return t.taskList
     case 'Skill':
-      return `Charge la compétence ${clip(s('skill'), 40)}`
+      return t.skill(clip(s('skill'), 40))
     case 'ToolSearch':
-      return 'Cherche les bons outils'
+      return t.toolSearch
     case 'AskUserQuestion':
-      return 'Te pose une question'
+      return t.ask
     case 'SendUserMessage':
-      return "T'envoie un message"
+      return t.sendMsg
     case 'SendUserFile':
-      return "T'envoie un fichier"
+      return t.sendFile
     case 'Artifact':
-      return 'Publie un artefact'
+      return t.artifact
     default:
       break
   }
   const mcp = /^mcp__(.+?)__(.+)$/.exec(tool)
-  if (mcp) {
-    const server = mcp[1]!.replace(/_/g, ' ')
-    const action = mcp[2]!.replace(/_/g, ' ')
-    return `Utilise ${server} › ${action}`
-  }
-  return `Utilise l'outil ${tool}`
+  if (mcp) return t.mcp(mcp[1]!.replace(/_/g, ' '), mcp[2]!.replace(/_/g, ' '))
+  return t.tool(tool)
 }
 
 /** A short avatar label for an agent type. */
@@ -205,16 +202,16 @@ export function initials(type: string): string {
   return two.toUpperCase()
 }
 
-export function statusWord(a: AgentCard): string {
+export function statusWord(a: AgentCard, t: Strings): string {
   switch (a.status) {
     case 'running':
-      return 'en cours'
+      return t.running
     case 'done':
-      return 'terminé'
+      return t.done
     case 'error':
-      return 'interrompu'
+      return t.error
     default:
-      return 'en attente'
+      return t.idle
   }
 }
 
@@ -283,7 +280,9 @@ export function bannerSvg(opts: {
   tokens: number
   usd: number
   actions: number
+  t: Strings
 }): string {
+  const t = opts.t
   const W = Math.round(opts.width)
   const H = 84
   const cx = 42
@@ -313,16 +312,18 @@ export function bannerSvg(opts: {
   const subs = running.filter(a => a.id !== 'main').length
   const subtitle = opts.isLive
     ? subs === 0
-      ? `Claude travaille · ${opts.actions} actions`
-      : `Claude + ${subs} sous-agent${subs > 1 ? 's' : ''} actif${subs > 1 ? 's' : ''} · ${opts.actions} actions`
+      ? t.mainWorking(opts.actions)
+      : t.withSubs(subs, opts.actions)
     : opts.actions === 0
-      ? 'En attente de ta première demande'
-      : `En pause · ${opts.actions} actions au total`
+      ? t.waitingFirst
+      : t.paused(opts.actions)
+  const word = opts.isLive ? t.live : t.pause
+  const wx = W - 16 - word.length * 9.2
   const live = opts.isLive
-    ? `<circle cx="${W - 66}" cy="22" r="4.5" fill="#F04438"><animate attributeName="opacity" values="1;0.25;1" dur="1.1s" repeatCount="indefinite"/></circle>` +
-      `<text x="${W - 56}" y="26.5" ${FONT} font-size="12" font-weight="700" letter-spacing="1.2" fill="#F04438">LIVE</text>`
-    : `<circle cx="${W - 74}" cy="22" r="4.5" fill="#B4B2A9"/>` +
-      `<text x="${W - 64}" y="26.5" ${FONT} font-size="12" font-weight="700" letter-spacing="1.2" fill="#8C8A83">PAUSE</text>`
+    ? `<circle cx="${(wx - 10).toFixed(1)}" cy="22" r="4.5" fill="#F04438"><animate attributeName="opacity" values="1;0.25;1" dur="1.1s" repeatCount="indefinite"/></circle>` +
+      `<text x="${wx.toFixed(1)}" y="26.5" ${FONT} font-size="12" font-weight="700" letter-spacing="1.2" fill="#F04438">${esc(word)}</text>`
+    : `<circle cx="${(wx - 10).toFixed(1)}" cy="22" r="4.5" fill="#B4B2A9"/>` +
+      `<text x="${wx.toFixed(1)}" y="26.5" ${FONT} font-size="12" font-weight="700" letter-spacing="1.2" fill="#8C8A83">${esc(word)}</text>`
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
     `<defs>` +
@@ -341,8 +342,8 @@ export function bannerSvg(opts: {
     `<text x="86" y="36" ${FONT} font-size="17" font-weight="700" fill="${INK}">Agent Radar</text>` +
     `<text x="86" y="56" ${FONT} font-size="12" fill="${MUTED}">${esc(subtitle)}</text>` +
     live +
-    `<text x="${W - 16}" y="52" text-anchor="end" ${FONT} font-size="15" font-weight="700" fill="${INK}">${esc(fmtEur(opts.usd))}</text>` +
-    `<text x="${W - 16}" y="68" text-anchor="end" ${FONT} font-size="11" fill="${MUTED}">${esc(fmtTokens(opts.tokens))} tokens · équivalent API</text>` +
+    `<text x="${W - 16}" y="52" text-anchor="end" ${FONT} font-size="15" font-weight="700" fill="${INK}">${esc(fmtEur(opts.usd, t))}</text>` +
+    `<text x="${W - 16}" y="68" text-anchor="end" ${FONT} font-size="11" fill="${MUTED}">${esc(t.tokensApi(fmtTokens(opts.tokens, t)))}</text>` +
     `</svg>`
   )
 }
@@ -423,42 +424,40 @@ export function textGauge(percent: number, width = 20): string {
   return '█'.repeat(n) + '░'.repeat(width - n)
 }
 
-export function quotaName(kind: string): string {
-  if (kind === 'five_hour') return 'Quota 5 h'
-  if (kind === 'seven_day') return 'Quota 7 jours'
-  if (kind === 'spend_limit') return 'Plafond de dépense'
+export function quotaName(kind: string, t: Strings): string {
+  if (kind === 'five_hour') return t.quota5h
+  if (kind === 'seven_day') return t.quota7d
+  if (kind === 'spend_limit') return t.spendLimit
   return kind.replace(/_/g, ' ')
 }
 
-export function resetLabel(resetsAt: string | undefined): string {
+export function resetLabel(resetsAt: string | undefined, t: Strings): string {
   if (!resetsAt) return ''
   const at = Date.parse(resetsAt)
   if (Number.isNaN(at)) return ''
   const d = new Date(at)
   const p = (n: number) => String(n).padStart(2, '0')
   const sameDay = new Date().toDateString() === d.toDateString()
-  return sameDay
-    ? ` · repart à ${p(d.getHours())}:${p(d.getMinutes())}`
-    : ` · repart le ${p(d.getDate())}/${p(d.getMonth() + 1)}`
+  return sameDay ? t.resetAt(`${p(d.getHours())}:${p(d.getMinutes())}`) : t.resetOn(`${p(d.getDate())}/${p(d.getMonth() + 1)}`)
 }
 
 // ---------------------------------------------------------------- recap card
 
 /** The finished task as a text to paste in a post. */
-export function recapText(r: Recap): string {
+export function recapText(r: Recap, t: Strings): string {
   const lines = [
-    `🛰️ Agent Radar : bilan de ma dernière tâche avec Claude`,
+    t.recapHeader,
     r.prompt ? `📝 « ${clip(r.prompt, 90)} »` : '',
-    `⏱ ${fmtDuration(r.durationMs)} · ⚙️ ${r.actions} actions · 🔢 ${fmtTokens(r.tokens)} tokens · 💶 ${fmtEur(r.usd)} en équivalent API`,
+    t.recapLine(fmtDuration(r.durationMs), r.actions, fmtTokens(r.tokens, t), fmtEur(r.usd, t)),
     r.agents.length > 1
-      ? `🤖 ${r.agents.length} agents : ${r.agents.map(a => `${a.label} (${a.actions})`).join(', ')}`
-      : `🤖 Claude a tout fait seul`,
+      ? t.recapAgents(r.agents.map(a => `${a.label} (${a.actions})`).join(', '), r.agents.length)
+      : t.recapAlone,
   ]
   return lines.filter(Boolean).join('\n')
 }
 
 /** The finished task as a 1200x630 social card (the size LinkedIn and X preview). */
-export function recapSvg(r: Recap): string {
+export function recapSvg(r: Recap, t: Strings): string {
   const W = 1200
   const H = 630
   const total = Math.max(1, r.agents.reduce((s, a) => s + a.actions, 0))
@@ -493,15 +492,15 @@ export function recapSvg(r: Recap): string {
     `<circle cx="1080" cy="110" r="120" fill="none" stroke="${MAIN_COLOR}" stroke-opacity="0.18" stroke-width="2"/>` +
     `<circle cx="1080" cy="110" r="60" fill="none" stroke="${MAIN_COLOR}" stroke-opacity="0.18" stroke-width="2"/>` +
     `<circle cx="1080" cy="110" r="10" fill="${MAIN_COLOR}"/>` +
-    `<text x="80" y="110" ${FONT} font-size="26" font-weight="700" letter-spacing="3" fill="${MAIN_COLOR}">AGENT RADAR · BILAN</text>` +
-    `<text x="80" y="176" ${FONT} font-size="40" font-weight="700" fill="${INK}">${esc(clip(r.prompt || 'Tâche terminée', 46))}</text>` +
-    stat(80, fmtDuration(r.durationMs), 'durée') +
-    stat(360, String(r.actions), 'actions') +
-    stat(600, fmtTokens(r.tokens), 'tokens') +
-    stat(870, fmtEur(r.usd), 'équivalent API') +
+    `<text x="80" y="110" ${FONT} font-size="26" font-weight="700" letter-spacing="3" fill="${MAIN_COLOR}">${esc(t.cardKicker)}</text>` +
+    `<text x="80" y="176" ${FONT} font-size="40" font-weight="700" fill="${INK}">${esc(clip(r.prompt || t.cardFallback, 46))}</text>` +
+    stat(80, fmtDuration(r.durationMs), t.duration) +
+    stat(360, String(r.actions), t.actionsWord) +
+    stat(600, fmtTokens(r.tokens, t), t.tokensWord) +
+    stat(870, fmtEur(r.usd, t), t.apiEquivalent) +
     segments +
     legend +
-    `<text x="80" y="570" ${FONT} font-size="20" fill="${MUTED}">${esc(`${r.agents.length} agent${r.agents.length > 1 ? 's' : ''} · github.com/Diwoo7/agent-radar`)}</text>` +
+    `<text x="80" y="570" ${FONT} font-size="20" fill="${MUTED}">${esc(`${t.agentsCount(r.agents.length)} · github.com/Diwoo7/agent-radar`)}</text>` +
     `</svg>`
   )
 }

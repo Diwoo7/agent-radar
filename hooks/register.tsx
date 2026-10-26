@@ -12,6 +12,8 @@ import type {
   TaskItem,
   TurnBase,
 } from '../types'
+import { STRINGS, detectLang, isLang, langFromName } from './i18n'
+import type { Lang, Strings } from './i18n'
 import {
   CARD,
   INK,
@@ -60,8 +62,8 @@ const tasksAtom = atom({ plugin: 'agent-radar', key: 'tasks' } as const, [] as T
 })
 const sessionAtom = atom(
   { plugin: 'agent-radar', key: 'session' } as const,
-  { startedAt: 0, isLive: false, hasAutoOpened: false, cwd: '' } as RadarSession,
-  { shape: 'session-2' },
+  { startedAt: 0, isLive: false, hasAutoOpened: false, cwd: '', lang: 'fr', langSource: 'default' } as RadarSession,
+  { shape: 'session-3' },
 )
 const measureAtom = atom(
   { plugin: 'agent-radar', key: 'measure' } as const,
@@ -82,7 +84,7 @@ function newCard(over: Partial<AgentCard> & Pick<AgentCard, 'id' | 'type' | 'lab
     description: '',
     status: 'idle',
     startedAt: Date.now(),
-    action: 'Prêt',
+    action: '',
     actions: 0,
     tokensIn: 0,
     tokensOut: 0,
@@ -93,25 +95,47 @@ function newCard(over: Partial<AgentCard> & Pick<AgentCard, 'id' | 'type' | 'lab
   }
 }
 
-function mainCard(): AgentCard {
+function mainCard(t: Strings): AgentCard {
   return newCard({
     id: MAIN,
     type: 'main',
-    label: 'Claude',
-    description: 'Agent principal : comprend ta demande et coordonne',
+    label: t.mainLabel,
+    description: t.mainDesc,
     color: MAIN_COLOR,
     order: 0,
-    action: 'En attente de ta demande',
+    action: t.waitingRequest,
   })
 }
 
 const loopKey = (agentId: string | undefined) => agentId ?? MAIN
+
+/** The words of the language in force. */
+async function words($: Engine): Promise<Strings> {
+  const s = await read($, sessionAtom)
+  return STRINGS[isLang(s.lang) ? s.lang : 'fr']
+}
+
+/** Claude's own `language` setting, else the machine's locale, when either names one of ours. */
+async function langFromEnvironment($: Engine): Promise<Lang | undefined> {
+  try {
+    const fromSetting = langFromName(await $.settings.read({ key: 'language' }))
+    if (fromSetting) return fromSetting
+  } catch {
+    // Settings unreadable here: try the locale.
+  }
+  try {
+    return langFromName((await $.env.get('LC_ALL')) ?? (await $.env.get('LANG')))
+  } catch {
+    return undefined
+  }
+}
 
 /** Makes sure a card exists for the loop, asking the engine who a new subagent is. */
 async function ensureAgent($: Engine, agentId: string | undefined) {
   const id = loopKey(agentId)
   const known = await read($, agentsAtom)
   if (known[id]) return
+  const t = await words($)
   let type = 'agent'
   let description = ''
   let parentId: string | undefined
@@ -129,7 +153,7 @@ async function ensureAgent($: Engine, agentId: string | undefined) {
   }
   await update($, agentsAtom, all => {
     if (all[id]) return all
-    if (id === MAIN) return { ...all, [MAIN]: mainCard() }
+    if (id === MAIN) return { ...all, [MAIN]: mainCard(t) }
     const subs = Object.values(all).filter(a => a.id !== MAIN)
     const sameType = subs.filter(a => a.type === type).length
     const label = sameType > 0 ? `${type} #${sameType + 1}` : type
@@ -144,7 +168,7 @@ async function ensureAgent($: Engine, agentId: string | undefined) {
         color: PALETTE[subs.length % PALETTE.length]!,
         order: subs.length + 1,
         status: 'running',
-        action: 'Démarre…',
+        action: t.starting,
       }),
     }
   })
@@ -198,23 +222,34 @@ function treeOrder(agents: Record<string, AgentCard>): Array<{ a: AgentCard; dep
   return out
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  /** The language the person picked in the plugin's settings, or `auto`. */
+  const chosen = isLang(options.language) ? options.language : undefined
+
   // ------------------------------------------------------------ session
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({
-      name: 'radar',
-      description: 'Ouvre Agent Radar : agents, actions, progression et consommation en direct',
-    })
-    await update($, agentsAtom, all => (all[MAIN] ? all : { ...all, [MAIN]: mainCard() }))
-    await update($, sessionAtom, s => ({ ...s, startedAt: s.startedAt || Date.now(), cwd: e.cwd }))
+    const lang = chosen ?? (await langFromEnvironment($))
+    await update($, sessionAtom, s => ({
+      ...s,
+      startedAt: s.startedAt || Date.now(),
+      cwd: e.cwd,
+      ...(lang
+        ? { lang, langSource: chosen ? ('config' as const) : ('setting' as const) }
+        : s.langSource === 'config' || s.langSource === 'setting'
+          ? { lang: 'fr' as const, langSource: 'default' as const }
+          : {}),
+    }))
+    const t = await words($)
+    await $.command.register({ name: 'radar', description: t.commandDesc })
+    await update($, agentsAtom, all => (all[MAIN] ? all : { ...all, [MAIN]: mainCard(t) }))
     return next(e)
   })
 
   on('command.run', { command: 'radar' }, async $ => {
     await update($, sessionAtom, s => ({ ...s, hasAutoOpened: true }))
     await $.ui.open({ id: PANE, title: TITLE })
-    return { text: 'Agent Radar est ouvert.' }
+    return { text: (await words($)).opened }
   })
 
   on('session.measure', async ($, e, next) => {
@@ -234,15 +269,24 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     const started = await next(e)
     const id = loopKey(e.agentId)
+    if (id === MAIN) {
+      // With no language picked or set, follow the person's own words.
+      const guessed = detectLang(e.text)
+      if (guessed) {
+        await update($, sessionAtom, (s): RadarSession =>
+          s.langSource === 'default' || s.langSource === 'prompt' ? { ...s, lang: guessed, langSource: 'prompt' } : s,
+        )
+      }
+    }
+    const t = await words($)
     await ensureAgent($, e.agentId)
     if (id === MAIN) {
       await autoOpen($)
       const all = await read($, agentsAtom)
-      const t = totals(all)
       await update($, turnBaseAtom, () => ({
         at: Date.now(),
         prompt: e.text,
-        ...t,
+        ...totals(all),
         perAgent: Object.fromEntries(Object.values(all).map(a => [a.id, a.actions])),
       }))
     }
@@ -251,7 +295,7 @@ export const register: Register = on => {
       status: 'running',
       endedAt: undefined,
       startedAt: a.status === 'running' ? a.startedAt : Date.now(),
-      action: id === MAIN ? 'Lit ta demande et réfléchit' : 'Prend connaissance de sa mission',
+      action: id === MAIN ? t.readsRequest : t.readsMission,
     }))
     await update($, sessionAtom, s => ({ ...s, isLive: true, startedAt: s.startedAt || Date.now() }))
     if (id !== MAIN) {
@@ -262,16 +306,13 @@ export const register: Register = on => {
           id: `start-${id}-${e.turnId}`,
           at: Date.now(),
           agentId: id,
-          text: card.description ? `démarre : ${card.description}` : 'démarre',
+          text: t.starts(card.description),
           isDone: true,
         })
         const running = Object.values(all).filter(a => a.id !== MAIN && a.status === 'running')
         await patchAgent($, undefined, m => ({
           ...m,
-          action:
-            running.length > 1
-              ? `Coordonne ${running.length} sous-agents en parallèle`
-              : `Délègue à ${card.label}${card.description ? ` : ${card.description}` : ''}`,
+          action: running.length > 1 ? t.coordinates(running.length) : t.delegates(card.label, card.description),
         }))
       }
     }
@@ -281,9 +322,8 @@ export const register: Register = on => {
   on('turn.step', async function* ($, e, next) {
     await ensureAgent($, e.agentId)
     if (e.index > 0) {
-      await patchAgent($, e.agentId, a =>
-        a.status === 'running' ? { ...a, action: 'Analyse les résultats et décide de la suite' } : a,
-      )
+      const t = await words($)
+      await patchAgent($, e.agentId, a => (a.status === 'running' ? { ...a, action: t.analyzing } : a))
     }
     const res = yield* next(e)
     const usage = res.usage
@@ -305,13 +345,14 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const id = loopKey(e.agentId)
+    const t = await words($)
     const isError = e.reason === 'error' || e.reason === 'refusal' || e.isAborted
     if (id === MAIN) {
       await patchAgent($, undefined, a => ({
         ...a,
         status: isError ? 'error' : 'idle',
         endedAt: Date.now(),
-        action: isError ? 'Interrompu' : 'A répondu · en attente de ta prochaine demande',
+        action: isError ? t.interrupted : t.answered,
       }))
       await update($, agentsAtom, all => {
         const out: Record<string, AgentCard> = {}
@@ -329,7 +370,11 @@ export const register: Register = on => {
       const actions = now.actions - base.actions
       if (actions > 0) {
         const agents = Object.values(all)
-          .map(a => ({ label: a.label, color: a.color, actions: a.actions - (base.perAgent[a.id] ?? 0) }))
+          .map(a => ({
+            label: a.id === MAIN ? t.mainLabel : a.label,
+            color: a.color,
+            actions: a.actions - (base.perAgent[a.id] ?? 0),
+          }))
           .filter(a => a.actions > 0)
           .sort((x, y) => y.actions - x.actions)
         const recap: Recap = {
@@ -343,7 +388,7 @@ export const register: Register = on => {
         }
         await update($, recapAtom, () => recap)
         if (!isError && e.durationMs >= LONG_TASK_MS) {
-          $.ui.toast(`✓ Tâche terminée en ${fmtDuration(e.durationMs)} · ${actions} actions · ${fmtEur(recap.usd)} équiv. API`)
+          $.ui.toast(t.toastDone(fmtDuration(e.durationMs), actions, fmtEur(recap.usd, t)))
           try {
             await $.audio.play({ asset: 'sounds/done.wav' }, { gain: 0.6 })
           } catch {
@@ -357,27 +402,19 @@ export const register: Register = on => {
         ...a,
         status: isError ? 'error' : 'done',
         endedAt: Date.now(),
-        action: isError ? 'Interrompu' : 'Mission terminée, rapport rendu',
+        action: isError ? t.interrupted : t.missionDone,
       }))
       await pushFeed($, {
         id: `end-${id}-${e.turnId}`,
         at: Date.now(),
         agentId: id,
-        text: isError ? 'a été interrompu' : `a terminé en ${fmtDuration(e.durationMs)}`,
+        text: isError ? t.wasInterrupted : t.endedIn(fmtDuration(e.durationMs)),
         isDone: true,
       })
       const all = await read($, agentsAtom)
       const still = Object.values(all).filter(a => a.id !== MAIN && a.status === 'running')
       await patchAgent($, undefined, m =>
-        m.status === 'running'
-          ? {
-              ...m,
-              action:
-                still.length > 0
-                  ? `Attend ${still.length} sous-agent${still.length > 1 ? 's' : ''}`
-                  : 'Rassemble les résultats des sous-agents',
-            }
-          : m,
+        m.status === 'running' ? { ...m, action: still.length > 0 ? t.waitsSubs(still.length) : t.gathers } : m,
       )
     }
     return next(e)
@@ -390,7 +427,8 @@ export const register: Register = on => {
   on('tool.call', { tool: /^(?!(Agent|Task|Workflow)$)/ }, async ($, e, next) => {
     const args = e as unknown as Record<string, unknown>
     const tool = String(e.tool)
-    const text = describeTool(tool, args)
+    const t = await words($)
+    const text = describeTool(tool, args, t)
     const feedId = e.tool_use_id ?? crypto.randomUUID()
     await autoOpen($)
     await ensureAgent($, e.agentId)
@@ -407,10 +445,10 @@ export const register: Register = on => {
     if (tool === 'TodoWrite' && Array.isArray(args.todos)) {
       const todos = args.todos as Array<{ content?: string; activeForm?: string; status?: string }>
       await update($, tasksAtom, () =>
-        todos.map((t, i) => ({
+        todos.map((td, i) => ({
           id: String(i + 1),
-          subject: t.content ?? t.activeForm ?? `Tâche ${i + 1}`,
-          status: (t.status === 'completed' || t.status === 'in_progress' ? t.status : 'pending') as TaskItem['status'],
+          subject: td.content ?? td.activeForm ?? `#${i + 1}`,
+          status: (td.status === 'completed' || td.status === 'in_progress' ? td.status : 'pending') as TaskItem['status'],
         })),
       )
     }
@@ -424,7 +462,7 @@ export const register: Register = on => {
       const subject = args.subject
       await update($, tasksAtom, (list): TaskItem[] => {
         const id = String(fromResult ?? fromText ?? list.length + 1)
-        return list.some(t => t.id === id) ? list : [...list, { id, subject, status: 'pending' }]
+        return list.some(x => x.id === id) ? list : [...list, { id, subject, status: 'pending' }]
       })
     }
     if (tool === 'TaskUpdate' && args.taskId !== undefined) {
@@ -432,17 +470,17 @@ export const register: Register = on => {
       const status = args.status
       await update($, tasksAtom, (list): TaskItem[] =>
         status === 'deleted'
-          ? list.filter(t => t.id !== id)
-          : list.map(t =>
-              t.id === id
+          ? list.filter(x => x.id !== id)
+          : list.map(x =>
+              x.id === id
                 ? {
-                    ...t,
-                    subject: typeof args.subject === 'string' ? args.subject : t.subject,
+                    ...x,
+                    subject: typeof args.subject === 'string' ? args.subject : x.subject,
                     status: (status === 'completed' || status === 'in_progress' || status === 'pending'
                       ? status
-                      : t.status) as TaskItem['status'],
+                      : x.status) as TaskItem['status'],
                   }
-                : t,
+                : x,
             ),
       )
     }
@@ -465,15 +503,18 @@ export const register: Register = on => {
     const session = await read($, sessionAtom)
     const measure = await read($, measureAtom)
     const recap = await read($, recapAtom)
+    const t = STRINGS[isLang(session.lang) ? session.lang : 'fr']
 
     const props = (e.props ?? {}) as { bodyColumns?: number }
     const cols = props.bodyColumns ?? e.viewport?.columns ?? 60
     const px = Math.max(260, Math.min(620, Math.round(cols * 7.6)))
 
-    const list = Object.values(agents)
-    const tree = treeOrder(agents)
+    // Claude's own card speaks the language in force, whatever it was made in.
+    const named = (a: AgentCard) => (a.id === MAIN ? { ...a, label: t.mainLabel, description: t.mainDesc } : a)
+    const list = Object.values(agents).map(named)
+    const tree = treeOrder(agents).map(n => ({ ...n, a: named(n.a) }))
     const { tokens: totalTokens, usd: totalUsd, actions: totalActions } = totals(agents)
-    const byId = (id: string) => agents[id]
+    const byId = (id: string) => (agents[id] ? named(agents[id]!) : undefined)
     const isLive = session.isLive
     const { done, total, current } = taskStats(tasks)
     const now = Date.now()
@@ -485,18 +526,18 @@ export const register: Register = on => {
 
     const header = Svg ? (
       <Svg
-        source={bannerSvg({ width: px, isLive, agents: list, tokens: totalTokens, usd: totalUsd, actions: totalActions })}
-        alt={`Agent Radar, ${isLive ? 'en direct' : 'en pause'}, ${fmtTokens(totalTokens)} tokens, ${fmtEur(totalUsd)} en équivalent API`}
+        source={bannerSvg({ width: px, isLive, agents: list, tokens: totalTokens, usd: totalUsd, actions: totalActions, t })}
+        alt={t.altBanner(isLive, fmtTokens(totalTokens, t), fmtEur(totalUsd, t))}
         width={px}
         isInteractive
       />
     ) : (
       <Box flexDirection="row" justifyContent="space-between">
         <Text bold color={INK}>
-          {isLive ? '● LIVE  ' : '○ PAUSE  '}Agent Radar
+          {isLive ? `● ${t.live}  ` : `○ ${t.pause}  `}Agent Radar
         </Text>
         <Text color={MUTED}>
-          {fmtTokens(totalTokens)} tokens · {fmtEur(totalUsd)} équiv. API
+          {fmtEur(totalUsd, t)} · {t.tokensApi(fmtTokens(totalTokens, t))}
         </Text>
       </Box>
     )
@@ -530,37 +571,29 @@ export const register: Register = on => {
     const gauges = (
       <Box flexDirection="column" gap={1} paddingX={1}>
         <Text bold color={INK}>
-          Mémoire et quota
+          {t.memoryQuota}
         </Text>
         {ctx === undefined ? (
-          <Text color={MUTED}>La jauge de contexte apparaît après la première réponse de Claude.</Text>
+          <Text color={MUTED}>{t.ctxPending}</Text>
         ) : (
           gaugeRow(
             'ctx',
-            'Contexte de la conversation',
+            t.ctxLabel,
             ctx,
-            `${fmtTokens(measure.contextTokens ?? 0)} / ${fmtTokens(measure.window)} tokens${
-              ctx >= 80 ? ' · bientôt plein : Claude va résumer la conversation' : ''
-            }`,
+            t.ctxDetail(fmtTokens(measure.contextTokens ?? 0, t), fmtTokens(measure.window, t), ctx >= 80),
           )
         )}
         {measure.rateLimits.map(r =>
-          gaugeRow(`quota-${r.kind}`, quotaName(r.kind), r.percentUsed, resetLabel(r.resetsAt).replace(/^ · /, '')),
+          gaugeRow(`quota-${r.kind}`, quotaName(r.kind, t), r.percentUsed, resetLabel(r.resetsAt, t)),
         )}
-        {measure.costUsd !== undefined && (
-          <Text color={MUTED}>Session entière selon Claude : {fmtEur(measure.costUsd)} en équivalent API (ton abonnement n'est pas facturé au token)</Text>
-        )}
+        {measure.costUsd !== undefined && <Text color={MUTED}>{t.sessionCost(fmtEur(measure.costUsd, t))}</Text>}
       </Box>
     )
 
     // ---------------------------------------------------------- progress
 
     const progressLabel =
-      total > 0
-        ? `${done}/${total} tâches${current ? ` · en cours : ${current.subject}` : ''}`
-        : isLive
-          ? `${totalActions} actions · ${runningSubs.length > 0 ? `${runningSubs.length} sous-agent(s) au travail` : 'Claude avance'}`
-          : 'Aucune tâche planifiée pour le moment'
+      total > 0 ? t.tasks(done, total, current?.subject) : isLive ? t.liveProgress(totalActions, runningSubs.length) : t.noTasks
     const ratio = total > 0 ? done / total : null
     const textBar = (() => {
       const width = 24
@@ -573,7 +606,7 @@ export const register: Register = on => {
       <Box flexDirection="column" gap={1} paddingX={1}>
         <Box flexDirection="row" justifyContent="space-between">
           <Text bold color={INK}>
-            Progression
+            {t.progress}
           </Text>
           <Text color={MUTED}>{ratio === null ? '' : `${Math.round(ratio * 100)} %`}</Text>
         </Box>
@@ -600,8 +633,6 @@ export const register: Register = on => {
 
     const cards = visible.map(({ a, depth }) => {
       const elapsed = (a.endedAt ?? now) - a.startedAt
-      const tokens = tokensOf(a)
-      const viewLabel = a.id === MAIN ? 'Fil principal' : 'Voir son fil'
       return (
         <Box key={`agent-${a.id}`} flexDirection="row" marginLeft={depth * 3}>
           {depth > 0 && <Text color={LINE}>↳ </Text>}
@@ -616,7 +647,7 @@ export const register: Register = on => {
             backgroundColor={CARD}
           >
             {Svg ? (
-              <Svg source={avatarSvg(a)} alt={`${a.label}, ${statusWord(a)}`} width={48} height={48} isInteractive />
+              <Svg source={avatarSvg(a)} alt={`${a.label}, ${statusWord(a, t)}`} width={48} height={48} isInteractive />
             ) : (
               <Text bold color={a.color}>
                 {a.status === 'running' ? '◉' : a.status === 'done' ? '✓' : '○'} {initials(a.type)}
@@ -629,7 +660,7 @@ export const register: Register = on => {
                 </Text>
                 <Text color={a.status === 'running' ? a.color : MUTED} bold={a.status === 'running'}>
                   {a.status === 'running' ? '● ' : ''}
-                  {statusWord(a)}
+                  {statusWord(a, t)}
                 </Text>
               </Box>
               {a.description !== '' && (
@@ -642,17 +673,17 @@ export const register: Register = on => {
                 {a.action}
               </Text>
               <Text color={MUTED} wrap="truncate-end">
-                ⏱ {fmtDuration(Math.max(0, elapsed))} · {a.actions} action{a.actions > 1 ? 's' : ''} ·{' '}
-                {fmtTokens(tokens)} tokens · {fmtEur(a.costUsd)} API
+                ⏱ {fmtDuration(Math.max(0, elapsed))} · {t.actions(a.actions)} · {fmtTokens(tokensOf(a), t)} tokens ·{' '}
+                {fmtEur(a.costUsd, t)} {t.api}
               </Text>
               {(a.id !== MAIN || list.length > 1) && (
                 <Box flexDirection="row">
                   <Button
                     key={`view-${a.id}`}
-                    label={viewLabel}
+                    label={a.id === MAIN ? t.viewMain : t.viewSub}
                     onPress={async () => {
                       const r = await $.ui.view(a.id === MAIN ? {} : { agentId: a.id })
-                      if (r.deny) $.ui.toast(`Impossible d'ouvrir ce fil ici : ${r.deny}`)
+                      if (r.deny) $.ui.toast(t.viewDeny(r.deny))
                     }}
                   />
                 </Box>
@@ -669,44 +700,42 @@ export const register: Register = on => {
       <Box flexDirection="column" gap={1} paddingX={1}>
         <Box flexDirection="row" justifyContent="space-between">
           <Text bold color={INK}>
-            Bilan de la dernière tâche
+            {t.recapTitle}
           </Text>
           <Text color={MUTED}>{fmtClock(recap.at)}</Text>
         </Box>
         {Svg ? (
           <Svg
-            source={recapSvg(recap)}
-            alt={recapText(recap)}
+            source={recapSvg(recap, t)}
+            alt={recapText(recap, t)}
             width={px - 24}
             height={Math.round(((px - 24) * 630) / 1200)}
           />
         ) : (
-          <Text color={INK}>{recapText(recap)}</Text>
+          <Text color={INK}>{recapText(recap, t)}</Text>
         )}
         <Box flexDirection="row" gap={1} flexWrap="wrap">
           <Button
             key="recap-copy"
-            label="Copier le texte"
+            label={t.copyText}
             onPress={async () => {
-              const r = await $.ui.copy({ text: recapText(recap), surface })
-              $.ui.toast(r.isCopied ? 'Bilan copié, prêt à coller dans ton post' : "La copie n'est pas disponible ici")
+              const r = await $.ui.copy({ text: recapText(recap, t), surface })
+              $.ui.toast(r.isCopied ? t.copied : t.copyUnavailable)
             }}
           />
           <Button
             key="recap-export"
-            label="Exporter en image"
+            label={t.exportImage}
             variant="primary"
             onPress={async () => {
               const s = await read($, sessionAtom)
               if (!s.cwd) {
-                $.ui.toast("Export indisponible : dossier de travail inconnu")
+                $.ui.toast(t.exportUnavailable)
                 return
               }
-              await $.fs.write(`${s.cwd.replace(/\/$/, '')}/${RECAP_FILE}`, recapSvg(recap))
-              await $.prompt.submit({
-                text: `Agent Radar : convertis le fichier ${RECAP_FILE} du dossier de travail en PNG 1200×630 et envoie-le-moi, sans autre commentaire.`,
-              })
-              $.ui.toast('Export lancé : Claude va t’envoyer l’image')
+              await $.fs.write(`${s.cwd.replace(/\/$/, '')}/${RECAP_FILE}`, recapSvg(recap, t))
+              await $.prompt.submit({ text: t.exportPrompt(RECAP_FILE) })
+              $.ui.toast(t.exportStarted)
             }}
           />
         </Box>
@@ -719,9 +748,9 @@ export const register: Register = on => {
     const activity = (
       <Box flexDirection="column" paddingX={1}>
         <Text bold color={INK}>
-          Fil d'activité
+          {t.feed}
         </Text>
-        {recent.length === 0 && <Text color={MUTED}>Rien pour l'instant. Pose une question à Claude !</Text>}
+        {recent.length === 0 && <Text color={MUTED}>{t.feedEmpty}</Text>}
         {recent.map(f => {
           const who = byId(f.agentId)
           return (
@@ -748,18 +777,12 @@ export const register: Register = on => {
         <Box flexDirection="column" gap={1}>
           <Box flexDirection="row" justifyContent="space-between" paddingX={1}>
             <Text bold color={INK}>
-              Agents
+              {t.agents}
             </Text>
-            <Text color={MUTED}>
-              {runningSubs.length} actif{runningSubs.length > 1 ? 's' : ''} · {list.length} au total
-            </Text>
+            <Text color={MUTED}>{t.activeCount(runningSubs.length, list.length)}</Text>
           </Box>
           {cards}
-          {hidden > 0 && (
-            <Text color={MUTED}>
-              + {hidden} autre{hidden > 1 ? 's' : ''} agent{hidden > 1 ? 's' : ''}
-            </Text>
-          )}
+          {hidden > 0 && <Text color={MUTED}>{t.others(hidden)}</Text>}
         </Box>
         {gauges}
         {recapBlock}
@@ -767,9 +790,9 @@ export const register: Register = on => {
         <Box flexDirection="row" justifyContent="flex-end">
           <Button
             key="reset"
-            label="Remettre à zéro"
+            label={t.reset}
             onPress={async () => {
-              await update($, agentsAtom, () => ({ [MAIN]: mainCard() }))
+              await update($, agentsAtom, () => ({ [MAIN]: mainCard(t) }))
               await update($, feedAtom, () => [])
               await update($, tasksAtom, () => [])
               await update($, recapAtom, () => null)

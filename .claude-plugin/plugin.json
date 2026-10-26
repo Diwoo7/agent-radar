@@ -1,8 +1,17 @@
 {
   "name": "agent-radar",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Live pane showing which subagent works, what it does in plain words, progress, and token/€ consumption",
   "author": { "name": "Tahar Saidi" },
   "license": "MIT",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language / Langue / Taal",
+      "description": "auto follows Claude's language setting, else the language of your requests (French by default)",
+      "default": "auto",
+      "options": ["auto", "fr", "en", "nl"]
+    }
+  }
 }

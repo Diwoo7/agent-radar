@@ -34,7 +34,11 @@ In the desktop app: click + next to the prompt box, then Plugins, Add marketplac
 
 ## Use
 
-The pane opens by itself the first time Claude starts working in a session, and stays closed if you close it. Type `/radar` to bring it back. When a task took more than 20 seconds, a toast and a short chime tell you it is done. The **Remettre à zéro** button clears the counters.
+The pane opens by itself the first time Claude starts working in a session, and stays closed if you close it. Type `/radar` to bring it back. When a task took more than 20 seconds, a toast and a short chime tell you it is done. The **Reset** button (Remettre à zéro, Opnieuw beginnen) clears the counters.
+
+## Language
+
+The pane speaks French, English or Dutch. The plugin's **Language** setting picks one; on `auto` (the default) it follows Claude's own `language` setting, else the language of your requests, and falls back to French.
 
 ## Notes
 
